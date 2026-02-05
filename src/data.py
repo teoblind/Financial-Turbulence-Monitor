@@ -1,0 +1,379 @@
+"""
+Data fetching and processing module.
+
+Handles downloading market data from yfinance, cleaning, and computing returns.
+Includes fallback to simulated data for testing when API access is unavailable.
+"""
+
+import logging
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+
+from .config import TurbulenceConfig
+
+logger = logging.getLogger(__name__)
+
+
+def generate_simulated_data(
+    tickers: List[str],
+    start_date: str,
+    end_date: str
+) -> pd.DataFrame:
+    """
+    Generate realistic simulated market data for testing.
+
+    Creates synthetic price data with realistic properties:
+    - Trending behavior
+    - Volatility clustering
+    - Cross-asset correlations
+    - Periodic stress events
+
+    Args:
+        tickers: List of ticker symbols
+        start_date: Start date string (YYYY-MM-DD)
+        end_date: End date string (YYYY-MM-DD)
+
+    Returns:
+        DataFrame of simulated prices
+    """
+    np.random.seed(42)  # For reproducibility
+
+    dates = pd.date_range(start=start_date, end=end_date, freq='B')
+    n_days = len(dates)
+    n_tickers = len(tickers)
+
+    logger.info(f"Generating simulated data for {n_tickers} tickers over {n_days} days")
+
+    # Base prices for different asset classes
+    base_prices = {
+        'SPY': 450, 'QQQ': 380, 'IWM': 200, 'EFA': 75, 'EEM': 42,
+        'TLT': 100, 'IEF': 105, 'HYG': 78, 'GLD': 180, 'USO': 75,
+        'UUP': 28, 'NVDA': 500, 'MSFT': 380, 'GOOGL': 140,
+        'AMZN': 170, 'SMH': 200, '^VIX': 18
+    }
+
+    # Correlation structure
+    # Equities correlated, bonds negative with equities, VIX inverse to equities
+    ticker_types = {
+        'equity': ['SPY', 'QQQ', 'IWM', 'EFA', 'EEM', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'SMH'],
+        'bond': ['TLT', 'IEF'],
+        'credit': ['HYG'],
+        'commodity': ['GLD', 'USO'],
+        'dollar': ['UUP'],
+        'volatility': ['^VIX']
+    }
+
+    # Create correlation matrix
+    corr_matrix = np.eye(n_tickers)
+    for i, t1 in enumerate(tickers):
+        for j, t2 in enumerate(tickers):
+            if i == j:
+                continue
+            # Same type: high correlation
+            for type_name, type_tickers in ticker_types.items():
+                if t1 in type_tickers and t2 in type_tickers:
+                    corr_matrix[i, j] = 0.7 + np.random.uniform(-0.1, 0.1)
+            # Equity vs Bond: negative correlation
+            if (t1 in ticker_types['equity'] and t2 in ticker_types['bond']) or \
+               (t2 in ticker_types['equity'] and t1 in ticker_types['bond']):
+                corr_matrix[i, j] = -0.3 + np.random.uniform(-0.1, 0.1)
+            # Equity vs VIX: strong negative correlation
+            if (t1 in ticker_types['equity'] and t2 in ticker_types['volatility']) or \
+               (t2 in ticker_types['equity'] and t1 in ticker_types['volatility']):
+                corr_matrix[i, j] = -0.6 + np.random.uniform(-0.1, 0.1)
+
+    # Make symmetric and positive definite
+    corr_matrix = (corr_matrix + corr_matrix.T) / 2
+    np.fill_diagonal(corr_matrix, 1.0)
+
+    # Eigenvalue adjustment for positive definiteness
+    eigvals, eigvecs = np.linalg.eigh(corr_matrix)
+    eigvals = np.maximum(eigvals, 0.01)
+    corr_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
+
+    # Base volatilities
+    base_vol = np.array([0.01 if t not in ['^VIX'] else 0.05 for t in tickers])
+
+    # Generate correlated returns with volatility clustering
+    L = np.linalg.cholesky(corr_matrix)
+
+    prices = np.zeros((n_days, n_tickers))
+    prices[0] = [base_prices.get(t, 100) for t in tickers]
+
+    vol_state = np.ones(n_tickers)  # Volatility multiplier
+
+    for t in range(1, n_days):
+        # Update volatility state (GARCH-like)
+        vol_state = 0.9 * vol_state + 0.1 * np.abs(np.random.randn(n_tickers))
+        vol_state = np.clip(vol_state, 0.5, 3.0)
+
+        # Add stress events
+        if t in [int(n_days * 0.3), int(n_days * 0.6), int(n_days * 0.85)]:
+            vol_state *= 2.5  # Spike volatility
+
+        # Generate correlated returns
+        z = np.random.randn(n_tickers)
+        correlated_z = L @ z
+
+        # Apply returns
+        daily_vol = base_vol * vol_state
+        returns = 0.0003 + daily_vol * correlated_z  # Small positive drift
+
+        # VIX moves inversely to equities
+        vix_idx = [i for i, t in enumerate(tickers) if t == '^VIX']
+        spy_idx = [i for i, t in enumerate(tickers) if t == 'SPY']
+        if vix_idx and spy_idx:
+            returns[vix_idx[0]] = -returns[spy_idx[0]] * 3 + np.random.randn() * 0.02
+
+        prices[t] = prices[t-1] * np.exp(returns)
+
+    # Create DataFrame
+    df = pd.DataFrame(prices, index=dates, columns=tickers)
+
+    logger.info(f"Generated simulated data: {df.shape[0]} rows, {df.shape[1]} columns")
+
+    return df
+
+
+class DataFetcher:
+    """Handles fetching and processing market data."""
+
+    def __init__(self, config: TurbulenceConfig):
+        self.config = config
+
+    def fetch_ticker_data(
+        self,
+        tickers: List[str],
+        start_date: str,
+        end_date: str,
+        use_simulated: bool = False
+    ) -> pd.DataFrame:
+        """
+        Fetch adjusted close prices for a list of tickers.
+
+        Args:
+            tickers: List of ticker symbols
+            start_date: Start date string (YYYY-MM-DD)
+            end_date: End date string (YYYY-MM-DD)
+            use_simulated: Force use of simulated data
+
+        Returns:
+            DataFrame with adjusted close prices, tickers as columns
+        """
+        # Try yfinance first, fall back to simulated if unavailable or fails
+        if not YFINANCE_AVAILABLE or use_simulated:
+            logger.info("Using simulated data (yfinance unavailable or simulated mode requested)")
+            return generate_simulated_data(tickers, start_date, end_date)
+
+        successful_tickers = []
+        all_data = {}
+
+        for ticker in tickers:
+            try:
+                logger.info(f"Fetching data for {ticker}...")
+                data = yf.download(
+                    ticker,
+                    start=start_date,
+                    end=end_date,
+                    progress=False,
+                    auto_adjust=True
+                )
+
+                if data.empty:
+                    logger.warning(f"No data returned for {ticker}, skipping")
+                    continue
+
+                # Handle both single and multi-index column cases
+                if isinstance(data.columns, pd.MultiIndex):
+                    close_col = ('Close', ticker)
+                    if close_col in data.columns:
+                        all_data[ticker] = data[close_col]
+                    else:
+                        all_data[ticker] = data['Close'].iloc[:, 0]
+                else:
+                    all_data[ticker] = data['Close']
+
+                successful_tickers.append(ticker)
+                logger.info(f"Successfully fetched {len(all_data[ticker])} rows for {ticker}")
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch {ticker}: {e}")
+                continue
+
+        if not all_data:
+            # Fall back to simulated data
+            logger.warning("Failed to fetch any live data. Falling back to simulated data.")
+            return generate_simulated_data(tickers, start_date, end_date)
+
+        # Combine all data into single DataFrame
+        prices_df = pd.DataFrame(all_data)
+        prices_df.index = pd.to_datetime(prices_df.index)
+        prices_df = prices_df.sort_index()
+
+        logger.info(f"Successfully fetched data for {len(successful_tickers)} tickers: {successful_tickers}")
+
+        return prices_df
+
+    def compute_returns(
+        self,
+        prices: pd.DataFrame,
+        method: str = 'log'
+    ) -> pd.DataFrame:
+        """
+        Compute returns from price data.
+
+        Args:
+            prices: DataFrame of prices
+            method: 'log' for log returns, 'simple' for simple returns
+
+        Returns:
+            DataFrame of returns
+        """
+        if method == 'log':
+            returns = np.log(prices / prices.shift(1))
+        else:
+            returns = prices.pct_change()
+
+        # Drop first row (NaN) and any rows with all NaN
+        returns = returns.dropna(how='all')
+
+        return returns
+
+    def compute_moving_averages(
+        self,
+        prices: pd.Series,
+        windows: List[int]
+    ) -> Dict[int, pd.Series]:
+        """
+        Compute moving averages for a price series.
+
+        Args:
+            prices: Price series
+            windows: List of window sizes
+
+        Returns:
+            Dictionary mapping window size to MA series
+        """
+        mas = {}
+        for window in windows:
+            mas[window] = prices.rolling(window=window).mean()
+        return mas
+
+    def fetch_all_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series]:
+        """
+        Fetch all required data for the turbulence system.
+
+        Returns:
+            Tuple of:
+            - turbulence_prices: Prices for turbulence basket
+            - turbulence_returns: Returns for turbulence basket
+            - ai_returns: Returns for AI sector basket
+            - vix: VIX series
+        """
+        use_sim = getattr(self.config, 'use_simulated', False)
+
+        # Fetch turbulence basket
+        logger.info("Fetching turbulence basket data...")
+        turbulence_prices = self.fetch_ticker_data(
+            self.config.turbulence_tickers,
+            self.config.start_date,
+            self.config.end_date,
+            use_simulated=use_sim
+        )
+
+        # Fetch VIX
+        logger.info("Fetching VIX data...")
+        try:
+            vix_data = self.fetch_ticker_data(
+                [self.config.vix_ticker],
+                self.config.start_date,
+                self.config.end_date,
+                use_simulated=use_sim
+            )
+            vix = vix_data[self.config.vix_ticker] if self.config.vix_ticker in vix_data.columns else vix_data.iloc[:, 0]
+        except Exception as e:
+            logger.warning(f"Failed to fetch VIX: {e}. Using NaN.")
+            vix = pd.Series(np.nan, index=turbulence_prices.index)
+
+        # Fetch AI basket
+        logger.info("Fetching AI sector basket data...")
+        try:
+            ai_prices = self.fetch_ticker_data(
+                self.config.ai_tickers,
+                self.config.start_date,
+                self.config.end_date,
+                use_simulated=use_sim
+            )
+            ai_returns = self.compute_returns(ai_prices)
+        except Exception as e:
+            logger.warning(f"Failed to fetch AI basket: {e}. Using empty DataFrame.")
+            ai_returns = pd.DataFrame()
+
+        # Compute returns
+        turbulence_returns = self.compute_returns(turbulence_prices)
+
+        # Align all data to common dates
+        common_index = turbulence_returns.index
+        if not vix.empty:
+            vix = vix.reindex(common_index)
+        if not ai_returns.empty:
+            ai_returns = ai_returns.reindex(common_index)
+
+        return turbulence_prices, turbulence_returns, ai_returns, vix
+
+    def get_spx_data(self, prices: pd.DataFrame) -> pd.Series:
+        """
+        Extract SPX/SPY data from prices DataFrame.
+
+        Args:
+            prices: Full prices DataFrame
+
+        Returns:
+            SPX price series
+        """
+        spx_ticker = self.config.spx_ticker
+        if spx_ticker in prices.columns:
+            return prices[spx_ticker]
+        elif 'SPY' in prices.columns:
+            return prices['SPY']
+        else:
+            raise ValueError(f"SPX ticker {spx_ticker} not found in data")
+
+
+def clean_data(df: pd.DataFrame, min_valid_ratio: float = 0.7) -> pd.DataFrame:
+    """
+    Clean DataFrame by handling missing values.
+
+    Args:
+        df: Input DataFrame
+        min_valid_ratio: Minimum ratio of valid (non-NaN) values required per column
+
+    Returns:
+        Cleaned DataFrame
+    """
+    # Remove columns with too many NaNs
+    valid_counts = df.notna().sum()
+    min_valid = int(len(df) * min_valid_ratio)
+    valid_columns = valid_counts[valid_counts >= min_valid].index.tolist()
+
+    if len(valid_columns) < len(df.columns):
+        removed = set(df.columns) - set(valid_columns)
+        logger.warning(f"Removed columns with insufficient data: {removed}")
+
+    df_clean = df[valid_columns].copy()
+
+    # Forward fill then backward fill remaining NaNs
+    df_clean = df_clean.ffill().bfill()
+
+    # Drop any remaining rows with NaN
+    df_clean = df_clean.dropna()
+
+    return df_clean
