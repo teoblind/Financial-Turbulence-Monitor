@@ -40,9 +40,10 @@ def run_pipeline(config: TurbulenceConfig) -> None:
     logger.info(f"Date range: {config.start_date} to {config.end_date}")
     logger.info(f"Divergence rule: {config.divergence_rule}")
     logger.info(f"Covariance method: {config.covariance_method}")
+    logger.info(f"Baseline method: {getattr(config, 'baseline_method', 'calm_period')}")
 
     # Step 1: Fetch data
-    logger.info("\n[1/5] Fetching market data...")
+    logger.info("\n[1/6] Fetching market data...")
     fetcher = DataFetcher(config)
     turbulence_prices, turbulence_returns, ai_returns, vix = fetcher.fetch_all_data()
 
@@ -54,16 +55,38 @@ def run_pipeline(config: TurbulenceConfig) -> None:
     # Get SPX data
     spx_prices = fetcher.get_spx_data(turbulence_prices)
 
-    # Step 2: Compute turbulence
-    logger.info("\n[2/5] Computing market turbulence...")
+    # Step 2: Compute turbulence (now baseline-anchored)
+    logger.info("\n[2/6] Computing market turbulence (baseline-anchored)...")
     calc = TurbulenceCalculator(config)
-    turbulence = calc.compute_rolling_turbulence(turbulence_returns_clean)
 
-    # Compute thresholds
-    warning_thresh, extreme_thresh = calc.compute_thresholds(turbulence)
+    # Compute baseline covariance from calm period, then score
+    turbulence = calc.compute_rolling_turbulence(
+        turbulence_returns_clean,
+        vix=vix,
+    )
 
-    # Compute days elevated
-    days_elevated = calc.compute_days_elevated(turbulence, warning_thresh)
+    # Step 3: Compute expanding thresholds + regimes + VIX override
+    logger.info("\n[3/6] Computing expanding thresholds and regimes...")
+    signal_gen = SignalGenerator(config)
+
+    # Expanding thresholds (Fix 2)
+    warning_thresh_series, extreme_thresh_series = signal_gen.compute_expanding_thresholds(turbulence)
+
+    # Also compute static thresholds (for backward compat / status display)
+    warning_thresh_static, extreme_thresh_static = calc.compute_thresholds(turbulence)
+
+    # For days_elevated, use the latest expanding threshold value
+    latest_warn = warning_thresh_series.dropna()
+    days_elevated_threshold = latest_warn.iloc[-1] if len(latest_warn) > 0 else warning_thresh_static
+    days_elevated = calc.compute_days_elevated(turbulence, days_elevated_threshold)
+
+    # Compute regimes using expanding thresholds
+    regime = signal_gen.compute_regime_series(
+        turbulence, warning_thresh_series, extreme_thresh_series
+    )
+
+    # Apply VIX override (Fix 3)
+    regime, vix_override = signal_gen.apply_vix_override(regime, vix)
 
     # Compute AI turbulence
     ai_turbulence = None
@@ -73,43 +96,38 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         if not ai_returns_clean.empty:
             ai_turbulence = compute_ai_turbulence(ai_returns_clean, config)
 
-    # Step 3: Generate signals
-    logger.info("\n[3/5] Generating signals...")
-    signal_gen = SignalGenerator(config)
-
-    # Detect divergence
+    # Step 4: Generate signals
+    logger.info("\n[4/6] Generating divergence signals...")
+    # Use the latest static threshold for divergence detection
     divergence = signal_gen.detect_divergence(
-        turbulence, spx_prices, warning_thresh, config.divergence_rule
+        turbulence, spx_prices, warning_thresh_static, config.divergence_rule
     )
-
-    # Compute regimes
-    regime = signal_gen.compute_regime_series(turbulence, warning_thresh, extreme_thresh)
 
     # Generate current status
     status = signal_gen.generate_status(
         turbulence=turbulence,
         spx_prices=spx_prices,
         vix=vix,
-        warning_threshold=warning_thresh,
-        extreme_threshold=extreme_thresh,
+        warning_threshold=warning_thresh_series,
+        extreme_threshold=extreme_thresh_series,
         days_elevated_series=days_elevated,
         divergence=divergence,
-        ai_turbulence=ai_turbulence
+        ai_turbulence=ai_turbulence,
+        regime_series=regime,
+        vix_override_series=vix_override,
     )
 
-    # Step 4: Print status to console
-    logger.info("\n[4/5] Current Market Status:")
+    # Step 5: Print status to console
+    logger.info("\n[5/6] Current Market Status:")
     status_text = format_status_text(status, signal_gen)
     print("\n" + status_text + "\n")
 
-    # Step 5: Render dashboard and save outputs
-    logger.info("\n[5/5] Rendering dashboard and saving outputs...")
+    # Step 6: Render dashboard and save outputs
+    logger.info("\n[6/6] Rendering dashboard and saving outputs...")
 
-    # Create output directory
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Render dashboard
     renderer = DashboardRenderer(config)
     dashboard_path = output_dir / config.dashboard_filename
 
@@ -119,7 +137,10 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         status=status,
         signal_gen=signal_gen,
         divergence=divergence,
-        output_path=str(dashboard_path)
+        output_path=str(dashboard_path),
+        vix=vix,
+        warning_threshold=warning_thresh_series,
+        extreme_threshold=extreme_thresh_series,
     )
     plt.close(fig)
 
@@ -132,9 +153,10 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         divergence=divergence,
         days_elevated=days_elevated,
         regime=regime,
-        warning_threshold=warning_thresh,
-        extreme_threshold=extreme_thresh,
-        output_path=str(features_path)
+        warning_threshold=warning_thresh_series,
+        extreme_threshold=extreme_thresh_series,
+        output_path=str(features_path),
+        vix_override=vix_override,
     )
 
     logger.info("\n" + "=" * 60)
@@ -157,6 +179,7 @@ Examples:
   python -m src.main --start 2023-01-01 --end 2026-01-01
   python -m src.main --divergence_rule ma20_slope
   python -m src.main --covariance sample --lookback 126
+  python -m src.main --baseline_method calm_period --baseline_vix 25
         """
     )
 
@@ -222,6 +245,19 @@ Examples:
         help='Use simulated data instead of fetching from yfinance'
     )
 
+    parser.add_argument(
+        '--baseline_method',
+        type=str,
+        choices=['calm_period', 'first_n_days', 'expanding'],
+        help='Baseline covariance method. Default: calm_period'
+    )
+
+    parser.add_argument(
+        '--baseline_vix',
+        type=float,
+        help='VIX ceiling for calm baseline period. Default: 25'
+    )
+
     # Jupyter compatibility: detect if running inside Jupyter kernel
     if "ipykernel" in sys.modules:
         args = parser.parse_args([])
@@ -253,6 +289,10 @@ Examples:
         config_kwargs['extreme_percentile'] = args.extreme_pct
     if args.simulated:
         config_kwargs['use_simulated'] = True
+    if args.baseline_method:
+        config_kwargs['baseline_method'] = args.baseline_method
+    if args.baseline_vix:
+        config_kwargs['baseline_vix_threshold'] = args.baseline_vix
 
     try:
         config = get_config(**config_kwargs)

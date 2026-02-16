@@ -63,9 +63,26 @@ class TurbulenceConfig:
     # Covariance estimation method: 'ledoit_wolf' or 'sample'
     covariance_method: Literal['ledoit_wolf', 'sample'] = 'ledoit_wolf'
 
+    # === Baseline / Dual-Covariance Settings ===
+    # Method for computing baseline covariance: "calm_period", "first_n_days", "expanding"
+    baseline_method: str = "calm_period"
+
+    # VIX ceiling used to identify "calm" days for the baseline covariance
+    baseline_vix_threshold: float = 25.0
+
+    # === VIX Override Settings ===
+    # VIX level that triggers an OVERRIDE_WARNING when model says HEALTHY
+    vix_warning_level: float = 40.0
+
+    # VIX level that forces minimum regime to ELEVATED
+    vix_critical_level: float = 60.0
+
     # === Threshold Percentiles ===
     warning_percentile: float = 95.0
     extreme_percentile: float = 99.0
+
+    # Minimum observations before computing expanding thresholds
+    min_threshold_observations: int = 126
 
     # === Divergence Detection ===
     # Rule for determining "SPX rising": 'ma50' or 'ma20_slope'

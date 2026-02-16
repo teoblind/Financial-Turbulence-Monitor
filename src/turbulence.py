@@ -2,7 +2,13 @@
 Market Turbulence calculation module.
 
 Implements Mahalanobis distance-based turbulence measurement following
-Kritzman & Li (2010) methodology.
+Kritzman & Li (2010) methodology, enhanced with a dual-covariance approach
+inspired by Jordi Visser's turbulence model.
+
+Key improvement: turbulence is measured against a CALM-PERIOD baseline
+covariance, not a rolling window that drifts into crisis data.  This
+prevents the desensitisation bug where extreme moves look "normal"
+because the rolling covariance has absorbed months of elevated vol.
 """
 
 import logging
@@ -22,20 +28,28 @@ class TurbulenceCalculator:
     Calculates market turbulence using Mahalanobis distance.
 
     The turbulence metric measures how unusual the current return vector is
-    relative to the historical distribution of returns across assets.
+    relative to a *calm-period baseline* distribution of returns across assets.
 
-    Turbulence_t = (r_t - μ)' Σ^(-1) (r_t - μ)
+    Turbulence_t = sqrt((r_t - mu_base)' Sigma_base^{-1} (r_t - mu_base))
 
     Where:
     - r_t is the return vector at time t
-    - μ is the mean return vector from the reference period
-    - Σ is the covariance matrix from the reference period
+    - mu_base is the mean return vector from the calm baseline period
+    - Sigma_base is the covariance matrix from the calm baseline period
     """
 
     def __init__(self, config: TurbulenceConfig):
         self.config = config
         self.warning_threshold: Optional[float] = None
         self.extreme_threshold: Optional[float] = None
+        # Baseline stats (computed once, used for all subsequent scoring)
+        self._baseline_mean: Optional[np.ndarray] = None
+        self._baseline_cov: Optional[np.ndarray] = None
+        self._baseline_cov_inv: Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------
+    # Covariance estimation helpers
+    # ------------------------------------------------------------------
 
     def estimate_covariance(
         self,
@@ -76,6 +90,89 @@ class TurbulenceCalculator:
 
         return mean_vec, cov_mat
 
+    # ------------------------------------------------------------------
+    # Baseline computation
+    # ------------------------------------------------------------------
+
+    def compute_baseline(
+        self,
+        returns: pd.DataFrame,
+        vix: Optional[pd.Series] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute calm-period baseline mean and covariance.
+
+        The baseline is the *anchor* the model uses so that when markets
+        enter stress the Mahalanobis distance actually increases rather
+        than staying flat because the rolling covariance absorbed the crisis.
+
+        Strategy (``baseline_method`` in config):
+        - "calm_period": use only days where VIX < baseline_vix_threshold.
+          Falls back to lowest-VIX quartile if fewer than min_observations
+          days qualify.
+        - "first_n_days": use the first ``lookback_window`` days of data.
+        - "expanding": use all data (original behaviour, kept for back-compat).
+
+        Returns:
+            Tuple of (baseline_mean, baseline_cov)
+        """
+        method = getattr(self.config, 'baseline_method', 'calm_period')
+
+        if method == 'calm_period' and vix is not None and not vix.empty:
+            # Align VIX to returns index
+            vix_aligned = vix.reindex(returns.index)
+
+            # Primary filter: VIX < threshold
+            threshold = getattr(self.config, 'baseline_vix_threshold', 25.0)
+            calm_mask = vix_aligned < threshold
+            calm_returns = returns.loc[calm_mask.fillna(False)]
+
+            # Fallback: if not enough calm days, use lowest-VIX quartile
+            if len(calm_returns) < self.config.min_observations:
+                logger.warning(
+                    f"Only {len(calm_returns)} days with VIX < {threshold}. "
+                    "Falling back to lowest-VIX quartile."
+                )
+                vix_valid = vix_aligned.dropna()
+                if len(vix_valid) > 0:
+                    q25 = vix_valid.quantile(0.25)
+                    calm_mask = vix_aligned <= q25
+                    calm_returns = returns.loc[calm_mask.fillna(False)]
+
+            # Second fallback: first N days
+            if len(calm_returns) < self.config.min_observations:
+                logger.warning(
+                    "Lowest-VIX quartile still insufficient. "
+                    "Using first lookback_window days as baseline."
+                )
+                calm_returns = returns.iloc[:self.config.lookback_window]
+
+        elif method == 'first_n_days':
+            calm_returns = returns.iloc[:self.config.lookback_window]
+        else:
+            # "expanding" or no VIX available — use all data
+            calm_returns = returns
+
+        logger.info(
+            f"Baseline computed from {len(calm_returns)} calm-period days "
+            f"(method={method})"
+        )
+
+        mean_vec, cov_mat = self.estimate_covariance(
+            calm_returns, method=self.config.covariance_method
+        )
+
+        # Cache for re-use
+        self._baseline_mean = mean_vec
+        self._baseline_cov = cov_mat
+        self._baseline_cov_inv = np.linalg.pinv(cov_mat)
+
+        return mean_vec, cov_mat
+
+    # ------------------------------------------------------------------
+    # Mahalanobis distance
+    # ------------------------------------------------------------------
+
     def compute_mahalanobis_distance(
         self,
         return_vec: np.ndarray,
@@ -108,21 +205,28 @@ class TurbulenceCalculator:
 
         return distance
 
+    # ------------------------------------------------------------------
+    # Rolling turbulence (baseline-anchored)
+    # ------------------------------------------------------------------
+
     def compute_rolling_turbulence(
         self,
         returns: pd.DataFrame,
-        lookback: Optional[int] = None
+        lookback: Optional[int] = None,
+        vix: Optional[pd.Series] = None,
     ) -> pd.Series:
         """
-        Compute rolling turbulence for each date.
+        Compute turbulence for each date, scored against the calm-period baseline.
 
-        For each date t, uses the previous `lookback` days to estimate
-        the reference distribution, then computes Mahalanobis distance
-        of the current day's returns.
+        Unlike the previous implementation that re-estimated covariance from a
+        rolling window (which drifts into crisis data), this version:
+        1. Computes a fixed baseline from calm-period data.
+        2. Measures every day's returns against that fixed baseline.
 
         Args:
             returns: DataFrame of returns (rows=dates, cols=assets)
-            lookback: Rolling window size (default: from config)
+            lookback: Minimum warmup period before scoring starts (default: from config)
+            vix: Optional VIX series used for calm-period identification
 
         Returns:
             Series of turbulence values indexed by date
@@ -130,48 +234,58 @@ class TurbulenceCalculator:
         if lookback is None:
             lookback = self.config.lookback_window
 
-        # Clean returns - drop any columns with too many NaNs
-        valid_columns = returns.columns[returns.notna().sum() > lookback]
+        # Clean returns — drop columns with too many NaNs
+        min_valid = min(lookback, len(returns))
+        valid_columns = returns.columns[returns.notna().sum() > min_valid]
+        if len(valid_columns) == 0:
+            # Not enough data for any column — return empty
+            logger.warning("No columns have enough valid observations. Returning empty turbulence.")
+            return pd.Series(dtype=float)
         returns_clean = returns[valid_columns].copy()
-
-        # Forward fill any remaining NaNs within columns
         returns_clean = returns_clean.ffill().bfill()
 
         n_days = len(returns_clean)
         turbulence = pd.Series(index=returns_clean.index, dtype=float)
 
-        logger.info(f"Computing turbulence with {lookback}-day lookback over {n_days} days...")
+        # --- Compute baseline covariance (fixed anchor) ---
+        if self._baseline_mean is None or self._baseline_cov is None:
+            try:
+                self.compute_baseline(returns_clean, vix=vix)
+            except ValueError as e:
+                logger.warning(f"Cannot compute baseline: {e}. Returning empty turbulence.")
+                return pd.Series(dtype=float)
 
+        baseline_mean = self._baseline_mean
+        baseline_cov_inv = self._baseline_cov_inv
+
+        logger.info(
+            f"Computing baseline-anchored turbulence over {n_days} days "
+            f"(warmup={lookback})..."
+        )
+
+        # Score every day from ``lookback`` onward against the baseline
         for i in range(lookback, n_days):
-            # Reference window: lookback days ending yesterday
-            ref_start = i - lookback
-            ref_end = i
-
-            ref_returns = returns_clean.iloc[ref_start:ref_end]
             current_return = returns_clean.iloc[i].values
 
-            # Skip if current return has NaN
             if np.any(np.isnan(current_return)):
                 continue
 
             try:
-                mean_vec, cov_mat = self.estimate_covariance(
-                    ref_returns,
-                    method=self.config.covariance_method
-                )
-                turbulence.iloc[i] = self.compute_mahalanobis_distance(
-                    current_return, mean_vec, cov_mat
-                )
+                diff = current_return - baseline_mean
+                dist = np.sqrt(diff @ baseline_cov_inv @ diff)
+                turbulence.iloc[i] = dist
             except Exception as e:
                 logger.warning(f"Turbulence calculation failed for index {i}: {e}")
                 continue
 
-        # Drop NaN values
         turbulence = turbulence.dropna()
-
         logger.info(f"Computed turbulence for {len(turbulence)} days")
 
         return turbulence
+
+    # ------------------------------------------------------------------
+    # Thresholds (static — kept for backward compat; rolling in signals.py)
+    # ------------------------------------------------------------------
 
     def compute_thresholds(
         self,
@@ -203,6 +317,10 @@ class TurbulenceCalculator:
 
         return self.warning_threshold, self.extreme_threshold
 
+    # ------------------------------------------------------------------
+    # Days elevated
+    # ------------------------------------------------------------------
+
     def compute_days_elevated(
         self,
         turbulence: pd.Series,
@@ -224,10 +342,7 @@ class TurbulenceCalculator:
         if threshold is None:
             raise ValueError("Threshold not set. Run compute_thresholds first.")
 
-        # Create boolean series for elevated days
         is_elevated = turbulence >= threshold
-
-        # Compute consecutive counts
         days_elevated = pd.Series(index=turbulence.index, dtype=int)
 
         count = 0

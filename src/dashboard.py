@@ -1,8 +1,8 @@
 """
 Dashboard visualization module.
 
-Creates the combined market turbulence dashboard with status panel and
-divergence detector chart using Matplotlib.
+Creates the combined market turbulence dashboard with status panel,
+divergence detector chart, and VIX subplot using Matplotlib.
 """
 
 import logging
@@ -26,7 +26,6 @@ class DashboardRenderer:
 
     def __init__(self, config: TurbulenceConfig):
         self.config = config
-        # Try different style names for compatibility
         for style in ['seaborn-v0_8-whitegrid', 'seaborn-whitegrid', 'ggplot', 'default']:
             try:
                 plt.style.use(style)
@@ -40,27 +39,18 @@ class DashboardRenderer:
         status: MarketStatus,
         signal_gen: SignalGenerator
     ) -> None:
-        """
-        Render the status panel as a text box.
-
-        Args:
-            ax: Matplotlib axes to render on
-            status: Current market status
-            signal_gen: Signal generator for interpretations
-        """
+        """Render the status panel as a text box."""
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.axis('off')
 
-        # Background color based on regime
         bg_colors = {
-            'HEALTHY': '#e8f5e9',  # Light green
-            'ELEVATED': '#fff3e0',  # Light orange
-            'CRISIS': '#ffebee'    # Light red
+            'HEALTHY': '#e8f5e9',
+            'ELEVATED': '#fff3e0',
+            'CRISIS': '#ffebee'
         }
         bg_color = bg_colors.get(status.regime, '#f5f5f5')
 
-        # Draw background rectangle
         rect = mpatches.FancyBboxPatch(
             (0.02, 0.02), 0.96, 0.96,
             boxstyle="round,pad=0.02",
@@ -70,30 +60,29 @@ class DashboardRenderer:
         )
         ax.add_patch(rect)
 
-        # Text formatting
         date_str = status.date.strftime("%Y-%m-%d")
-
-        # Title
         ax.text(0.5, 0.92, f"CURRENT IMMUNE SYSTEM STATUS — {date_str}",
                 ha='center', va='top', fontsize=14, fontweight='bold',
                 family='monospace')
 
-        # Regime indicator colors
         regime_colors = {
             'HEALTHY': self.config.status_healthy,
             'ELEVATED': self.config.status_elevated,
             'CRISIS': self.config.status_crisis
         }
 
-        # Warning level
-        ax.text(0.5, 0.83, f"WARNING LEVEL: {status.regime}",
+        regime_label = status.regime
+        if status.vix_override and status.model_regime:
+            regime_label += f"  [VIX OVERRIDE]"
+
+        ax.text(0.5, 0.83, f"WARNING LEVEL: {regime_label}",
                 ha='center', va='top', fontsize=16, fontweight='bold',
                 color=regime_colors.get(status.regime, 'black'),
                 family='monospace')
 
         # Metrics - left column
         y_start = 0.72
-        line_height = 0.055
+        line_height = 0.050
         left_x = 0.08
 
         metrics = [
@@ -112,12 +101,34 @@ class DashboardRenderer:
             ax.text(left_x + 0.02, y_start - i * line_height, f"• {metric}",
                     ha='left', va='top', fontsize=10, family='monospace')
 
+        # VIX override indicator
+        override_y = y_start - 5 * line_height
+        if status.vix_override:
+            override_text = "• VIX Override: ACTIVE"
+            override_color = self.config.status_crisis
+            override_weight = 'bold'
+        else:
+            override_text = "• VIX Override: inactive"
+            override_color = 'black'
+            override_weight = 'normal'
+        ax.text(left_x + 0.02, override_y, override_text,
+                ha='left', va='top', fontsize=10, family='monospace',
+                color=override_color, fontweight=override_weight)
+
         # Divergence indicator
+        div_y = override_y - line_height
         div_color = self.config.status_crisis if status.divergence_active else 'black'
-        div_text = "YES ⚠" if status.divergence_active else "NO"
-        ax.text(left_x + 0.02, y_start - 5 * line_height, f"• Divergence Active: {div_text}",
+        div_text = "YES" if status.divergence_active else "NO"
+        ax.text(left_x + 0.02, div_y, f"• Divergence Active: {div_text}",
                 ha='left', va='top', fontsize=10, family='monospace',
                 color=div_color, fontweight='bold' if status.divergence_active else 'normal')
+
+        # If overridden, show model regime
+        if status.vix_override and status.model_regime:
+            ax.text(left_x + 0.02, div_y - line_height,
+                    f"• Model Regime (pre-override): {status.model_regime}",
+                    ha='left', va='top', fontsize=10, family='monospace',
+                    color='#666666')
 
         # AI Sector - right side top
         right_x = 0.55
@@ -143,24 +154,24 @@ class DashboardRenderer:
                     ha='left', va='top', fontsize=9, family='monospace')
 
         # Recommended Actions - bottom
-        action_y = 0.22
+        action_y = 0.20
         ax.text(0.08, action_y, "RECOMMENDED ACTIONS:",
                 ha='left', va='top', fontsize=11, fontweight='bold',
                 family='monospace')
 
         actions = signal_gen.get_recommended_actions(status.regime)
         for i, action in enumerate(actions[:3]):
-            ax.text(0.10, action_y - (i + 1) * 0.045, f"• {action}",
+            ax.text(0.10, action_y - (i + 1) * 0.042, f"• {action}",
                     ha='left', va='top', fontsize=9, family='monospace')
 
         # Thresholds - bottom right
         ax.text(right_x, action_y, "THRESHOLDS:",
                 ha='left', va='top', fontsize=11, fontweight='bold',
                 family='monospace')
-        ax.text(right_x + 0.02, action_y - 0.045,
+        ax.text(right_x + 0.02, action_y - 0.042,
                 f"• Warning (P95): {status.warning_threshold:.1f}",
                 ha='left', va='top', fontsize=9, family='monospace')
-        ax.text(right_x + 0.02, action_y - 0.09,
+        ax.text(right_x + 0.02, action_y - 0.084,
                 f"• Extreme (P99): {status.extreme_threshold:.1f}",
                 ha='left', va='top', fontsize=9, family='monospace')
 
@@ -169,26 +180,32 @@ class DashboardRenderer:
         ax: plt.Axes,
         turbulence: pd.Series,
         spx_prices: pd.Series,
-        warning_threshold: float,
-        extreme_threshold: float,
-        divergence: pd.Series
+        warning_threshold,
+        extreme_threshold,
+        divergence: pd.Series,
+        vix: Optional[pd.Series] = None,
     ) -> None:
         """
-        Render the divergence detector chart.
+        Render the divergence detector chart with optional VIX subplot.
 
-        Args:
-            ax: Matplotlib axes to render on
-            turbulence: Turbulence series
-            spx_prices: SPX price series
-            warning_threshold: Warning threshold value
-            extreme_threshold: Extreme threshold value
-            divergence: Boolean series indicating divergence
+        ``warning_threshold`` and ``extreme_threshold`` may be scalars or
+        pd.Series (expanding thresholds).
         """
-        # Align data
         common_idx = turbulence.index.intersection(spx_prices.index)
         turb = turbulence.loc[common_idx]
         spx = spx_prices.loc[common_idx]
         div = divergence.reindex(common_idx).fillna(False)
+
+        # Resolve thresholds to arrays for plotting
+        if isinstance(warning_threshold, pd.Series):
+            warn_vals = warning_threshold.reindex(common_idx)
+        else:
+            warn_vals = pd.Series(warning_threshold, index=common_idx)
+
+        if isinstance(extreme_threshold, pd.Series):
+            ext_vals = extreme_threshold.reindex(common_idx)
+        else:
+            ext_vals = pd.Series(extreme_threshold, index=common_idx)
 
         # Create twin axis for SPX
         ax2 = ax.twinx()
@@ -206,15 +223,15 @@ class DashboardRenderer:
         ax2.plot(spx.index, ma50.values, color=self.config.color_ma50,
                  linewidth=1, linestyle='--', label='50-day MA', alpha=0.7, zorder=2)
 
-        # Draw threshold lines
-        ax.axhline(y=warning_threshold, color=self.config.color_warning,
-                   linestyle='--', linewidth=1.5, label=f'Warning (P95): {warning_threshold:.1f}',
-                   zorder=2)
-        ax.axhline(y=extreme_threshold, color=self.config.color_extreme,
-                   linestyle='--', linewidth=1.5, label=f'Extreme (P99): {extreme_threshold:.1f}',
-                   zorder=2)
+        # Draw threshold lines (now rolling)
+        ax.plot(warn_vals.index, warn_vals.values,
+                color=self.config.color_warning, linestyle='--', linewidth=1.5,
+                label=f'Warning (P95)', zorder=2)
+        ax.plot(ext_vals.index, ext_vals.values,
+                color=self.config.color_extreme, linestyle='--', linewidth=1.5,
+                label=f'Extreme (P99)', zorder=2)
 
-        # Add green shading for divergence periods
+        # Green shading for divergence periods
         in_divergence = False
         start_date = None
 
@@ -227,7 +244,6 @@ class DashboardRenderer:
                           color=self.config.color_divergence, zorder=1)
                 in_divergence = False
 
-        # Handle if still in divergence at end
         if in_divergence and start_date is not None:
             ax.axvspan(start_date, div.index[-1], alpha=0.3,
                       color=self.config.color_divergence, zorder=1)
@@ -240,20 +256,17 @@ class DashboardRenderer:
         ax.tick_params(axis='y', labelcolor=self.config.color_turbulence)
         ax2.tick_params(axis='y', labelcolor=self.config.color_spx)
 
-        # X-axis date formatting
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
-        # Set y limits with some padding
-        turb_max = max(turb.max(), extreme_threshold * 1.2)
+        turb_max = max(turb.max(), ext_vals.dropna().max() * 1.2) if len(ext_vals.dropna()) > 0 else turb.max() * 1.2
         ax.set_ylim(0, turb_max)
 
         # Combined legend
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
 
-        # Add divergence patch to legend
         div_patch = mpatches.Patch(color=self.config.color_divergence, alpha=0.3,
                                    label='Divergence (High Turb + SPX Rising)')
         all_handles = lines1 + lines2 + [div_patch]
@@ -262,7 +275,44 @@ class DashboardRenderer:
         ax.legend(all_handles, all_labels, loc='upper left', fontsize=8,
                   framealpha=0.9)
 
-        # Grid
+        ax.grid(True, alpha=0.3, zorder=0)
+        ax.set_axisbelow(True)
+
+    def render_vix_subplot(
+        self,
+        ax: plt.Axes,
+        vix: pd.Series,
+        turbulence: pd.Series,
+    ) -> None:
+        """Render a VIX subplot below the main divergence chart."""
+        common_idx = turbulence.index.intersection(vix.dropna().index)
+        if len(common_idx) == 0:
+            ax.text(0.5, 0.5, 'VIX data unavailable', ha='center', va='center')
+            return
+
+        vix_plot = vix.reindex(common_idx)
+
+        ax.plot(vix_plot.index, vix_plot.values, color='#8B0000',
+                linewidth=1.2, label='VIX')
+        ax.fill_between(vix_plot.index, 0, vix_plot.values,
+                        alpha=0.15, color='#8B0000')
+
+        # Draw override thresholds
+        warn_level = getattr(self.config, 'vix_warning_level', 40.0)
+        crit_level = getattr(self.config, 'vix_critical_level', 60.0)
+        ax.axhline(y=warn_level, color='orange', linestyle=':', linewidth=1,
+                   label=f'VIX Warning ({warn_level:.0f})')
+        ax.axhline(y=crit_level, color='red', linestyle=':', linewidth=1,
+                   label=f'VIX Critical ({crit_level:.0f})')
+
+        ax.set_ylabel('VIX', fontsize=10, color='#8B0000')
+        ax.tick_params(axis='y', labelcolor='#8B0000')
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+        ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
         ax.grid(True, alpha=0.3, zorder=0)
         ax.set_axisbelow(True)
 
@@ -273,44 +323,48 @@ class DashboardRenderer:
         status: MarketStatus,
         signal_gen: SignalGenerator,
         divergence: pd.Series,
-        output_path: Optional[str] = None
+        output_path: Optional[str] = None,
+        vix: Optional[pd.Series] = None,
+        warning_threshold=None,
+        extreme_threshold=None,
     ) -> plt.Figure:
         """
         Render the complete dashboard.
 
-        Args:
-            turbulence: Turbulence series
-            spx_prices: SPX price series
-            status: Current market status
-            signal_gen: Signal generator
-            divergence: Divergence boolean series
-            output_path: Optional path to save the figure
-
-        Returns:
-            Matplotlib figure object
+        Now includes a VIX subplot at the bottom when VIX data is available.
+        ``warning_threshold`` and ``extreme_threshold`` may be scalars or Series.
         """
-        # Create figure with GridSpec
-        fig = plt.figure(figsize=(self.config.figure_width, self.config.figure_height))
+        has_vix = vix is not None and not vix.empty
 
-        # Use GridSpec for layout: status panel on top (30%), chart below (70%)
-        gs = fig.add_gridspec(2, 1, height_ratios=[0.35, 0.65], hspace=0.15)
+        # Layout: status panel (30%), main chart (50%), VIX subplot (20%)
+        if has_vix:
+            fig = plt.figure(figsize=(self.config.figure_width, self.config.figure_height + 2))
+            gs = fig.add_gridspec(3, 1, height_ratios=[0.30, 0.48, 0.22], hspace=0.20)
+        else:
+            fig = plt.figure(figsize=(self.config.figure_width, self.config.figure_height))
+            gs = fig.add_gridspec(2, 1, height_ratios=[0.35, 0.65], hspace=0.15)
 
         # Status panel
         ax_status = fig.add_subplot(gs[0])
         self.render_status_panel(ax_status, status, signal_gen)
 
+        # Resolve thresholds for chart
+        w_thresh = warning_threshold if warning_threshold is not None else status.warning_threshold
+        e_thresh = extreme_threshold if extreme_threshold is not None else status.extreme_threshold
+
         # Divergence chart
         ax_chart = fig.add_subplot(gs[1])
         self.render_divergence_chart(
-            ax_chart,
-            turbulence,
-            spx_prices,
-            status.warning_threshold,
-            status.extreme_threshold,
-            divergence
+            ax_chart, turbulence, spx_prices,
+            w_thresh, e_thresh, divergence,
+            vix=vix,
         )
 
-        # Main title
+        # VIX subplot
+        if has_vix:
+            ax_vix = fig.add_subplot(gs[2])
+            self.render_vix_subplot(ax_vix, vix, turbulence)
+
         fig.suptitle(
             "DIVERGENCE DETECTOR: Turbulence vs SPX (ENLARGED)\n"
             "(Green shading = High turbulence while SPX rising - YOUR WARNING SIGNAL)",
@@ -319,7 +373,6 @@ class DashboardRenderer:
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
 
-        # Save if path provided
         if output_path:
             output_file = Path(output_path)
             output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -337,32 +390,29 @@ def save_features_csv(
     divergence: pd.Series,
     days_elevated: pd.Series,
     regime: pd.Series,
-    warning_threshold: float,
-    extreme_threshold: float,
-    output_path: str
+    warning_threshold,
+    extreme_threshold,
+    output_path: str,
+    vix_override: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Save computed features to CSV.
 
-    Args:
-        turbulence: Turbulence series
-        spx_prices: SPX price series
-        vix: VIX series
-        divergence: Divergence boolean series
-        days_elevated: Days elevated series
-        regime: Regime classification series
-        warning_threshold: Warning threshold
-        extreme_threshold: Extreme threshold
-        output_path: Path to save CSV
-
-    Returns:
-        DataFrame of features
+    ``warning_threshold`` and ``extreme_threshold`` may be scalars or pd.Series.
     """
-    # Compute 50-day MA
     spx_ma50 = spx_prices.rolling(window=50).mean()
-
-    # Align all series to common index
     common_idx = turbulence.index
+
+    # Resolve thresholds
+    if isinstance(warning_threshold, pd.Series):
+        warn_col = warning_threshold.reindex(common_idx)
+    else:
+        warn_col = pd.Series(warning_threshold, index=common_idx)
+
+    if isinstance(extreme_threshold, pd.Series):
+        ext_col = extreme_threshold.reindex(common_idx)
+    else:
+        ext_col = pd.Series(extreme_threshold, index=common_idx)
 
     features = pd.DataFrame({
         'spx_close': spx_prices.reindex(common_idx),
@@ -370,14 +420,16 @@ def save_features_csv(
         'spx_above_50dma': (spx_prices > spx_ma50).reindex(common_idx),
         'vix': vix.reindex(common_idx),
         'turbulence': turbulence,
-        'warning_threshold': warning_threshold,
-        'extreme_threshold': extreme_threshold,
+        'warning_threshold': warn_col,
+        'extreme_threshold': ext_col,
         'regime': regime.reindex(common_idx),
         'divergence': divergence.reindex(common_idx),
-        'days_elevated': days_elevated.reindex(common_idx)
+        'days_elevated': days_elevated.reindex(common_idx),
     })
 
-    # Save to CSV
+    if vix_override is not None:
+        features['vix_override'] = vix_override.reindex(common_idx)
+
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     features.to_csv(output_file)
