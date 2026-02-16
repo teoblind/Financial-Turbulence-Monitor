@@ -15,8 +15,9 @@ class TurbulenceConfig:
     """Configuration for the Market Turbulence Monitoring System."""
 
     # === Date Range ===
-    # Default: last 3 years of data
-    start_date: str = (datetime.now() - timedelta(days=3*365)).strftime("%Y-%m-%d")
+    # Default: last 5 years of data (covers more stress periods for
+    # better baseline calibration and visible desensitisation comparison)
+    start_date: str = (datetime.now() - timedelta(days=5*365)).strftime("%Y-%m-%d")
     end_date: str = datetime.now().strftime("%Y-%m-%d")
 
     # === Ticker Configuration ===
@@ -159,7 +160,7 @@ def get_config(**kwargs) -> TurbulenceConfig:
     if 'end_date' not in kwargs:
         config.end_date = datetime.now().strftime("%Y-%m-%d")
     if 'start_date' not in kwargs:
-        config.start_date = (datetime.now() - timedelta(days=3*365)).strftime("%Y-%m-%d")
+        config.start_date = (datetime.now() - timedelta(days=5*365)).strftime("%Y-%m-%d")
 
     for key, value in kwargs.items():
         if hasattr(config, key):

@@ -67,6 +67,12 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         vix=vix,
     )
 
+    # Also compute the old rolling-window turbulence for comparison
+    logger.info("Computing rolling-window turbulence (for comparison)...")
+    turbulence_rolling = calc.compute_rolling_turbulence_naive(
+        turbulence_returns_clean,
+    )
+
     # Step 3: Compute expanding thresholds
     logger.info("\n[3/7] Computing expanding thresholds...")
     signal_gen = SignalGenerator(config)
@@ -166,6 +172,7 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         hyg_ief_ratio=hyg_ief_ratio,
         contagion=contagion,
         regime_counts=regime_counts,
+        turbulence_rolling=turbulence_rolling,
     )
     plt.close(fig)
 
@@ -187,6 +194,7 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         contagion=contagion,
         dispersion=dispersion,
         dispersion_pctile=dispersion_pctile,
+        turbulence_rolling=turbulence_rolling,
     )
 
     logger.info("\n" + "=" * 60)

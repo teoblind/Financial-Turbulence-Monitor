@@ -210,13 +210,15 @@ class DashboardRenderer:
         extreme_threshold,
         divergence: pd.Series,
         regime: Optional[pd.Series] = None,
+        turbulence_rolling: Optional[pd.Series] = None,
     ) -> None:
         """
-        Render the turbulence chart with regime shading.
+        Render the turbulence chart with regime shading and optional
+        rolling-window comparison trace.
 
-        GREEN_BAR periods → yellow shading
-        STORM_CONTAGION periods → red shading
-        STORM periods → orange shading
+        GREEN_BAR periods -> yellow shading
+        STORM_CONTAGION periods -> red shading
+        STORM periods -> orange shading
         """
         common_idx = turbulence.index.intersection(spx_prices.index)
         turb = turbulence.loc[common_idx]
@@ -236,9 +238,30 @@ class DashboardRenderer:
         # Twin axis for SPX
         ax2 = ax.twinx()
 
-        # Plot turbulence
+        # Plot baseline-anchored turbulence (the good one)
         ax.plot(turb.index, turb.values, color=self.config.color_turbulence,
-                linewidth=1.2, label='Market Turbulence', zorder=3)
+                linewidth=1.5, label='Turbulence (Baseline-Anchored)', zorder=4)
+
+        # Plot rolling-window turbulence (the old, desensitised one) if available
+        if turbulence_rolling is not None and not turbulence_rolling.empty:
+            rolling_aligned = turbulence_rolling.reindex(common_idx)
+            ax.plot(rolling_aligned.index, rolling_aligned.values,
+                    color='#999999', linewidth=1.0, linestyle='-', alpha=0.6,
+                    label='Turbulence (Rolling-Window)', zorder=3)
+
+            # Shade the gap where baseline > rolling (= desensitisation gap)
+            both_valid = turb.notna() & rolling_aligned.notna()
+            if both_valid.any():
+                idx_valid = common_idx[both_valid]
+                turb_v = turb.reindex(idx_valid).values
+                roll_v = rolling_aligned.reindex(idx_valid).values
+                ax.fill_between(
+                    idx_valid, roll_v, turb_v,
+                    where=turb_v > roll_v,
+                    alpha=0.18, color='#d62728',
+                    label='Desensitisation Gap', zorder=2,
+                    interpolate=True,
+                )
 
         # Plot SPX
         ax2.plot(spx.index, spx.values, color=self.config.color_spx,
@@ -409,6 +432,7 @@ class DashboardRenderer:
         hyg_ief_ratio: Optional[pd.Series] = None,
         contagion: Optional[pd.Series] = None,
         regime_counts: Optional[dict] = None,
+        turbulence_rolling: Optional[pd.Series] = None,
     ) -> plt.Figure:
         """
         Render the complete dashboard with status panel, turbulence chart,
@@ -445,6 +469,7 @@ class DashboardRenderer:
             ax_chart, turbulence, spx_prices,
             w_thresh, e_thresh, divergence,
             regime=regime,
+            turbulence_rolling=turbulence_rolling,
         )
 
         # VIX subplot
@@ -461,8 +486,9 @@ class DashboardRenderer:
 
         fig.suptitle(
             "MARKET TURBULENCE MONITOR — Jordi Visser Framework\n"
-            "(Regime shading: Yellow=GREEN_BAR  Orange=STORM  Red=STORM_CONTAGION)",
-            fontsize=13, fontweight='bold', y=0.99
+            "(Red line=Baseline-Anchored  Grey line=Rolling-Window  "
+            "Shaded gap=Desensitisation fix)",
+            fontsize=12, fontweight='bold', y=0.99
         )
 
         plt.tight_layout(rect=[0, 0, 1, 0.97])
@@ -493,6 +519,7 @@ def save_features_csv(
     contagion: Optional[pd.Series] = None,
     dispersion: Optional[pd.Series] = None,
     dispersion_pctile: Optional[pd.Series] = None,
+    turbulence_rolling: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Save computed features to CSV.
@@ -541,6 +568,13 @@ def save_features_csv(
 
     if dispersion_pctile is not None:
         features['dispersion_pctile'] = dispersion_pctile.reindex(common_idx)
+
+    if turbulence_rolling is not None and not turbulence_rolling.empty:
+        features['turbulence_rolling'] = turbulence_rolling.reindex(common_idx)
+        # Desensitisation gap: how much the rolling approach underestimates
+        features['desensitisation_gap'] = (
+            features['turbulence'] - features['turbulence_rolling']
+        )
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)

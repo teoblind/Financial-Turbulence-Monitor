@@ -285,6 +285,83 @@ class TurbulenceCalculator:
         return turbulence
 
     # ------------------------------------------------------------------
+    # Rolling-window turbulence (old approach — for comparison only)
+    # ------------------------------------------------------------------
+
+    def compute_rolling_turbulence_naive(
+        self,
+        returns: pd.DataFrame,
+        lookback: Optional[int] = None,
+    ) -> pd.Series:
+        """
+        Compute turbulence using a naive rolling-window covariance.
+
+        This is the OLD approach that suffers from desensitisation: as
+        stress persists, the rolling window absorbs crisis volatility and
+        the Mahalanobis distance shrinks back toward "normal."
+
+        Kept solely so the dashboard can overlay both traces and make
+        the desensitisation problem visible.
+
+        Args:
+            returns: DataFrame of returns (rows=dates, cols=assets)
+            lookback: Rolling window size (default: from config)
+
+        Returns:
+            Series of turbulence values indexed by date
+        """
+        if lookback is None:
+            lookback = self.config.lookback_window
+
+        # Clean returns
+        min_valid = min(lookback, len(returns))
+        valid_columns = returns.columns[returns.notna().sum() > min_valid]
+        if len(valid_columns) == 0:
+            return pd.Series(dtype=float)
+        returns_clean = returns[valid_columns].copy()
+        returns_clean = returns_clean.ffill().bfill()
+
+        n_days = len(returns_clean)
+        turbulence = pd.Series(index=returns_clean.index, dtype=float)
+
+        logger.info(
+            f"Computing ROLLING-WINDOW turbulence (naive) over {n_days} days "
+            f"(lookback={lookback})..."
+        )
+
+        for i in range(lookback, n_days):
+            window = returns_clean.iloc[i - lookback:i]
+            current_return = returns_clean.iloc[i].values
+
+            if np.any(np.isnan(current_return)):
+                continue
+
+            try:
+                mean_vec = window.mean().values
+                if self.config.covariance_method == 'ledoit_wolf':
+                    try:
+                        lw = LedoitWolf()
+                        lw.fit(window.values)
+                        cov_mat = lw.covariance_
+                    except Exception:
+                        cov_mat = window.cov().values
+                else:
+                    cov_mat = window.cov().values
+
+                cov_inv = np.linalg.pinv(cov_mat)
+                diff = current_return - mean_vec
+                dist = np.sqrt(diff @ cov_inv @ diff)
+                turbulence.iloc[i] = dist
+            except Exception as e:
+                logger.warning(f"Rolling turbulence failed at index {i}: {e}")
+                continue
+
+        turbulence = turbulence.dropna()
+        logger.info(f"Computed rolling-window turbulence for {len(turbulence)} days")
+
+        return turbulence
+
+    # ------------------------------------------------------------------
     # Thresholds (static — kept for backward compat; rolling in signals.py)
     # ------------------------------------------------------------------
 
