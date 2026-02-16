@@ -258,7 +258,7 @@ class DashboardRenderer:
                 ax.fill_between(
                     idx_valid, roll_v, turb_v,
                     where=turb_v > roll_v,
-                    alpha=0.35, color='#ffc107',
+                    alpha=0.18, color='#d62728',
                     label='Desensitisation Gap', zorder=2,
                     interpolate=True,
                 )
@@ -487,7 +487,7 @@ class DashboardRenderer:
         fig.suptitle(
             "MARKET TURBULENCE MONITOR — Jordi Visser Framework\n"
             "(Red line=Baseline-Anchored  Grey line=Rolling-Window  "
-            "Yellow shading=Desensitisation Gap)",
+            "Shaded gap=Desensitisation fix)",
             fontsize=12, fontweight='bold', y=0.99
         )
 
