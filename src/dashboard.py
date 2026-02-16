@@ -158,23 +158,42 @@ class DashboardRenderer:
                 ha='left', va='top', fontsize=9, family='monospace',
                 color=div_color, fontweight='bold' if status.divergence_active else 'normal')
 
-        # Right column — interpretation + actions
+        # Right column — tech sector context + interpretation + actions
         right_x = 0.52
 
-        # Interpretation
-        ax.text(right_x, y_start + line_h, "INTERPRETATION:",
+        # Tech sector context (AI Infra vs SaaS)
+        ax.text(right_x, y_start + line_h, "TECH SECTOR CONTEXT:",
                 ha='left', va='top', fontsize=10, fontweight='bold',
                 family='monospace')
-        for i, interp in enumerate(signal_gen.get_interpretation(status.regime)[:4]):
-            ax.text(right_x + 0.02, y_start - i * line_h, f"  {interp}",
+        ai_infra_text = f"{status.ai_infra_turbulence:.1f}" if status.ai_infra_turbulence is not None else "N/A"
+        saas_text = f"{status.saas_turbulence:.1f}" if status.saas_turbulence is not None else "N/A"
+        ax.text(right_x + 0.02, y_start, f"  AI Infra: {ai_infra_text}",
+                ha='left', va='top', fontsize=9, family='monospace')
+
+        # Color SaaS reading red if it's notably higher than AI Infra (rotation signal)
+        saas_color = '#333333'
+        if (status.saas_turbulence is not None and status.ai_infra_turbulence is not None
+                and status.saas_turbulence > status.ai_infra_turbulence * 1.5):
+            saas_color = '#dc3545'
+        ax.text(right_x + 0.02, y_start - line_h, f"  SaaS:     {saas_text}",
+                ha='left', va='top', fontsize=9, family='monospace',
+                color=saas_color, fontweight='bold' if saas_color != '#333333' else 'normal')
+
+        # Interpretation
+        interp_y = y_start - 2.5 * line_h
+        ax.text(right_x, interp_y, "INTERPRETATION:",
+                ha='left', va='top', fontsize=10, fontweight='bold',
+                family='monospace')
+        for i, interp in enumerate(signal_gen.get_interpretation(status.regime)[:3]):
+            ax.text(right_x + 0.02, interp_y - (i + 1) * line_h, f"  {interp}",
                     ha='left', va='top', fontsize=8, family='monospace')
 
         # Actions
-        action_y = y_start - 5 * line_h
+        action_y = interp_y - 4.5 * line_h
         ax.text(right_x, action_y, "RECOMMENDED ACTIONS:",
                 ha='left', va='top', fontsize=10, fontweight='bold',
                 family='monospace')
-        for i, action in enumerate(signal_gen.get_recommended_actions(status.regime)[:4]):
+        for i, action in enumerate(signal_gen.get_recommended_actions(status.regime)[:3]):
             ax.text(right_x + 0.02, action_y - (i + 1) * line_h, f"  {action}",
                     ha='left', va='top', fontsize=8, family='monospace')
 

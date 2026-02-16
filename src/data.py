@@ -58,12 +58,17 @@ def generate_simulated_data(
         'SPY': 450, 'QQQ': 380, 'IWM': 200, 'EFA': 75, 'EEM': 42,
         'TLT': 100, 'IEF': 105, 'HYG': 78, 'GLD': 180, 'USO': 75,
         'UUP': 28, 'NVDA': 500, 'MSFT': 380, 'GOOGL': 140,
-        'AMZN': 170, 'SMH': 200, '^VIX': 18
+        'AMZN': 170, 'SMH': 200,
+        # SaaS basket
+        'CRM': 280, 'NOW': 700, 'SNOW': 160, 'DDOG': 120,
+        'CRWD': 300, 'WDAY': 250, 'ZS': 200,
+        '^VIX': 18,
     }
 
     # Correlation structure
     ticker_types = {
-        'equity': ['SPY', 'QQQ', 'IWM', 'EFA', 'EEM', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'SMH'],
+        'equity': ['SPY', 'QQQ', 'IWM', 'EFA', 'EEM', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'SMH',
+                   'CRM', 'NOW', 'SNOW', 'DDOG', 'CRWD', 'WDAY', 'ZS'],
         'bond': ['TLT', 'IEF'],
         'credit': ['HYG'],
         'commodity': ['GLD', 'USO'],
@@ -294,7 +299,7 @@ class DataFetcher:
 
         return augmented, hyg_ief_ratio
 
-    def fetch_all_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    def fetch_all_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
         """
         Fetch all required data for the turbulence system.
 
@@ -302,7 +307,8 @@ class DataFetcher:
             Tuple of:
             - turbulence_prices: Prices for turbulence basket
             - turbulence_returns: Returns for turbulence basket (with ratio pairs if enabled)
-            - ai_returns: Returns for AI sector basket
+            - ai_infra_returns: Returns for AI infrastructure basket
+            - saas_returns: Returns for SaaS basket
             - vix: VIX series
             - hyg_ief_ratio: Raw HYG/IEF price ratio for contagion detection
         """
@@ -331,19 +337,33 @@ class DataFetcher:
             logger.warning(f"Failed to fetch VIX: {e}. Using NaN.")
             vix = pd.Series(np.nan, index=turbulence_prices.index)
 
-        # Fetch AI basket
-        logger.info("Fetching AI sector basket data...")
+        # Fetch AI Infrastructure basket (hyperscalers / semis)
+        logger.info("Fetching AI Infrastructure basket data...")
         try:
-            ai_prices = self.fetch_ticker_data(
-                self.config.ai_tickers,
+            ai_infra_prices = self.fetch_ticker_data(
+                self.config.ai_infra_tickers,
                 self.config.start_date,
                 self.config.end_date,
                 use_simulated=use_sim
             )
-            ai_returns = self.compute_returns(ai_prices)
+            ai_infra_returns = self.compute_returns(ai_infra_prices)
         except Exception as e:
-            logger.warning(f"Failed to fetch AI basket: {e}. Using empty DataFrame.")
-            ai_returns = pd.DataFrame()
+            logger.warning(f"Failed to fetch AI Infra basket: {e}. Using empty DataFrame.")
+            ai_infra_returns = pd.DataFrame()
+
+        # Fetch SaaS basket (application-layer names)
+        logger.info("Fetching SaaS basket data...")
+        try:
+            saas_prices = self.fetch_ticker_data(
+                self.config.saas_tickers,
+                self.config.start_date,
+                self.config.end_date,
+                use_simulated=use_sim
+            )
+            saas_returns = self.compute_returns(saas_prices)
+        except Exception as e:
+            logger.warning(f"Failed to fetch SaaS basket: {e}. Using empty DataFrame.")
+            saas_returns = pd.DataFrame()
 
         # Compute returns
         turbulence_returns = self.compute_returns(turbulence_prices)
@@ -359,12 +379,14 @@ class DataFetcher:
         common_index = turbulence_returns.index
         if not vix.empty:
             vix = vix.reindex(common_index)
-        if not ai_returns.empty:
-            ai_returns = ai_returns.reindex(common_index)
+        if not ai_infra_returns.empty:
+            ai_infra_returns = ai_infra_returns.reindex(common_index)
+        if not saas_returns.empty:
+            saas_returns = saas_returns.reindex(common_index)
         if not hyg_ief_ratio.empty:
             hyg_ief_ratio = hyg_ief_ratio.reindex(common_index)
 
-        return turbulence_prices, turbulence_returns, ai_returns, vix, hyg_ief_ratio
+        return turbulence_prices, turbulence_returns, ai_infra_returns, saas_returns, vix, hyg_ief_ratio
 
     def get_spx_data(self, prices: pd.DataFrame) -> pd.Series:
         """

@@ -45,7 +45,8 @@ class MarketStatus:
     spx_ma50_ratio: float
     vix_level: float
     divergence_active: bool
-    ai_turbulence: Optional[float] = None
+    ai_infra_turbulence: Optional[float] = None
+    saas_turbulence: Optional[float] = None
     warning_threshold: float = 0.0
     extreme_threshold: float = 0.0
     # Contagion / credit
@@ -532,7 +533,8 @@ class SignalGenerator:
         extreme_threshold,
         days_elevated_series: pd.Series,
         divergence: pd.Series,
-        ai_turbulence: Optional[pd.Series] = None,
+        ai_infra_turbulence: Optional[pd.Series] = None,
+        saas_turbulence: Optional[pd.Series] = None,
         regime_series: Optional[pd.Series] = None,
         vix_override_series: Optional[pd.Series] = None,
         hyg_ief_slope: Optional[pd.Series] = None,
@@ -587,13 +589,21 @@ class SignalGenerator:
         if vix_override_series is not None and latest_date in vix_override_series.index:
             vix_override = bool(vix_override_series.loc[latest_date])
 
-        # AI turbulence
-        ai_turb = None
-        if ai_turbulence is not None and not ai_turbulence.empty:
-            if latest_date in ai_turbulence.index:
-                ai_turb = ai_turbulence.loc[latest_date]
-            elif len(ai_turbulence) > 0:
-                ai_turb = ai_turbulence.iloc[-1]
+        # AI Infrastructure turbulence
+        ai_infra_turb = None
+        if ai_infra_turbulence is not None and not ai_infra_turbulence.empty:
+            if latest_date in ai_infra_turbulence.index:
+                ai_infra_turb = ai_infra_turbulence.loc[latest_date]
+            elif len(ai_infra_turbulence) > 0:
+                ai_infra_turb = ai_infra_turbulence.iloc[-1]
+
+        # SaaS turbulence
+        saas_turb = None
+        if saas_turbulence is not None and not saas_turbulence.empty:
+            if latest_date in saas_turbulence.index:
+                saas_turb = saas_turbulence.loc[latest_date]
+            elif len(saas_turbulence) > 0:
+                saas_turb = saas_turbulence.iloc[-1]
 
         # Contagion / credit
         hyg_ief_trend = None
@@ -626,7 +636,8 @@ class SignalGenerator:
             spx_ma50_ratio=float(spx_ratio),
             vix_level=float(latest_vix) if not np.isnan(latest_vix) else 0.0,
             divergence_active=div_active,
-            ai_turbulence=float(ai_turb) if ai_turb is not None else None,
+            ai_infra_turbulence=float(ai_infra_turb) if ai_infra_turb is not None else None,
+            saas_turbulence=float(saas_turb) if saas_turb is not None else None,
             warning_threshold=float(w_thresh),
             extreme_threshold=float(e_thresh),
             hyg_ief_trend=hyg_ief_trend,
@@ -679,11 +690,15 @@ def format_status_text(status: MarketStatus, signal_gen: SignalGenerator) -> str
     lines.append(f"    Divergence Active: {'YES' if status.divergence_active else 'NO'}")
     lines.append("")
 
-    lines.append("  AI SECTOR CONTEXT:")
-    if status.ai_turbulence is not None:
-        lines.append(f"    AI Basket Turbulence: {status.ai_turbulence:.1f}")
+    lines.append("  TECH SECTOR CONTEXT:")
+    if status.ai_infra_turbulence is not None:
+        lines.append(f"    AI Infra Turbulence: {status.ai_infra_turbulence:.1f}")
     else:
-        lines.append("    AI Basket Turbulence: N/A")
+        lines.append("    AI Infra Turbulence: N/A")
+    if status.saas_turbulence is not None:
+        lines.append(f"    SaaS Turbulence:     {status.saas_turbulence:.1f}")
+    else:
+        lines.append("    SaaS Turbulence:     N/A")
     lines.append("")
 
     lines.append("  INTERPRETATION:")

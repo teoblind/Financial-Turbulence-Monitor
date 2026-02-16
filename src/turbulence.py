@@ -434,31 +434,37 @@ class TurbulenceCalculator:
         return days_elevated
 
 
-def compute_ai_turbulence(
-    ai_returns: pd.DataFrame,
-    config: TurbulenceConfig
+def compute_sector_turbulence(
+    sector_returns: pd.DataFrame,
+    config: TurbulenceConfig,
+    label: str = "sector",
 ) -> pd.Series:
     """
-    Compute turbulence for AI/Tech sector basket.
+    Compute turbulence for an arbitrary sector basket.
 
     Args:
-        ai_returns: DataFrame of AI sector returns
+        sector_returns: DataFrame of sector returns
         config: Configuration object
+        label: Human-readable label for log messages
 
     Returns:
-        Series of AI sector turbulence values
+        Series of sector turbulence values
     """
-    if ai_returns.empty:
+    if sector_returns.empty:
         return pd.Series(dtype=float)
 
     calculator = TurbulenceCalculator(config)
 
     try:
-        ai_turbulence = calculator.compute_rolling_turbulence(
-            ai_returns,
-            lookback=min(config.lookback_window, len(ai_returns) - 1)
+        turbulence = calculator.compute_rolling_turbulence(
+            sector_returns,
+            lookback=min(config.lookback_window, len(sector_returns) - 1)
         )
-        return ai_turbulence
+        return turbulence
     except Exception as e:
-        logger.warning(f"Failed to compute AI turbulence: {e}")
+        logger.warning(f"Failed to compute {label} turbulence: {e}")
         return pd.Series(dtype=float)
+
+
+# Backward-compat alias
+compute_ai_turbulence = compute_sector_turbulence

@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 from .config import TurbulenceConfig, get_config
 from .data import DataFetcher, clean_data
-from .turbulence import TurbulenceCalculator, compute_ai_turbulence
+from .turbulence import TurbulenceCalculator, compute_sector_turbulence
 from .signals import SignalGenerator, format_status_text
 from .dashboard import DashboardRenderer, save_features_csv
 
@@ -45,10 +45,10 @@ def run_pipeline(config: TurbulenceConfig) -> None:
     logger.info(f"Baseline method: {getattr(config, 'baseline_method', 'calm_period')}")
     logger.info(f"Include ratio pairs: {getattr(config, 'include_ratio_pairs', True)}")
 
-    # Step 1: Fetch data (now returns 5 items including hyg_ief_ratio)
+    # Step 1: Fetch data (returns 6 items: prices, returns, ai_infra, saas, vix, hyg_ief)
     logger.info("\n[1/7] Fetching market data...")
     fetcher = DataFetcher(config)
-    turbulence_prices, turbulence_returns, ai_returns, vix, hyg_ief_ratio = fetcher.fetch_all_data()
+    turbulence_prices, turbulence_returns, ai_infra_returns, saas_returns, vix, hyg_ief_ratio = fetcher.fetch_all_data()
 
     # Clean data
     turbulence_returns_clean = clean_data(turbulence_returns)
@@ -110,13 +110,21 @@ def run_pipeline(config: TurbulenceConfig) -> None:
     logger.info("\n[5/7] Computing cross-sectional dispersion...")
     dispersion, dispersion_pctile = signal_gen.compute_dispersion(turbulence_returns_clean)
 
-    # Compute AI turbulence
-    ai_turbulence = None
-    if not ai_returns.empty:
-        logger.info("Computing AI sector turbulence...")
-        ai_returns_clean = clean_data(ai_returns, min_valid_ratio=0.5)
-        if not ai_returns_clean.empty:
-            ai_turbulence = compute_ai_turbulence(ai_returns_clean, config)
+    # Compute AI Infrastructure turbulence (hyperscalers / semis)
+    ai_infra_turbulence = None
+    if not ai_infra_returns.empty:
+        logger.info("Computing AI Infrastructure turbulence...")
+        ai_infra_clean = clean_data(ai_infra_returns, min_valid_ratio=0.5)
+        if not ai_infra_clean.empty:
+            ai_infra_turbulence = compute_sector_turbulence(ai_infra_clean, config, label="AI Infra")
+
+    # Compute SaaS turbulence (application-layer names)
+    saas_turbulence = None
+    if not saas_returns.empty:
+        logger.info("Computing SaaS turbulence...")
+        saas_clean = clean_data(saas_returns, min_valid_ratio=0.5)
+        if not saas_clean.empty:
+            saas_turbulence = compute_sector_turbulence(saas_clean, config, label="SaaS")
 
     # Step 6: Generate signals and status
     logger.info("\n[6/7] Generating signals and status...")
@@ -136,7 +144,8 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         extreme_threshold=extreme_thresh_series,
         days_elevated_series=days_elevated,
         divergence=divergence,
-        ai_turbulence=ai_turbulence,
+        ai_infra_turbulence=ai_infra_turbulence,
+        saas_turbulence=saas_turbulence,
         regime_series=regime,
         vix_override_series=vix_override,
         hyg_ief_slope=hyg_ief_slope,

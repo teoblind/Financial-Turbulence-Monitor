@@ -45,13 +45,24 @@ class TurbulenceConfig:
         "UUP",   # US Dollar Index
     ])
 
-    # AI/Tech basket for sector context
-    ai_tickers: List[str] = field(default_factory=lambda: [
+    # AI Infrastructure basket — capex beneficiaries / hyperscalers
+    ai_infra_tickers: List[str] = field(default_factory=lambda: [
         "NVDA",  # NVIDIA
         "MSFT",  # Microsoft
         "GOOGL", # Alphabet
         "AMZN",  # Amazon
         "SMH",   # Semiconductor ETF
+    ])
+
+    # SaaS basket — application-layer names (Jordi's "Supersonic Tsunami" cohort)
+    saas_tickers: List[str] = field(default_factory=lambda: [
+        "CRM",   # Salesforce
+        "NOW",   # ServiceNow
+        "SNOW",  # Snowflake
+        "DDOG",  # Datadog
+        "CRWD",  # CrowdStrike
+        "WDAY",  # Workday
+        "ZS",    # Zscaler
     ])
 
     # === Turbulence Calculation ===
@@ -68,8 +79,10 @@ class TurbulenceConfig:
     # Method: "calm_period", "first_n_days", "expanding"
     baseline_method: str = "calm_period"
 
-    # VIX ceiling used to identify "calm" days for the baseline covariance
-    baseline_vix_threshold: float = 25.0
+    # VIX ceiling used to identify "calm" days for the baseline covariance.
+    # 18 restricts the baseline to genuinely quiet markets (VIX 12-17).
+    # At 25 the filter passes ~96% of days, defeating the purpose of a calm anchor.
+    baseline_vix_threshold: float = 18.0
 
     # Minimum days needed for baseline computation
     min_baseline_days: int = 252
