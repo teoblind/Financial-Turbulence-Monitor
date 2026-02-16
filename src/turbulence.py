@@ -1,7 +1,7 @@
 """
 Market Turbulence calculation module.
 
-Implements Mahalanobis distance-based turbulence measurement following
+Implements squared Mahalanobis distance (d²) turbulence measurement following
 Kritzman & Li (2010) methodology, enhanced with a dual-covariance approach
 inspired by Jordi Visser's turbulence model.
 
@@ -25,12 +25,17 @@ logger = logging.getLogger(__name__)
 
 class TurbulenceCalculator:
     """
-    Calculates market turbulence using Mahalanobis distance.
+    Calculates market turbulence using squared Mahalanobis distance (d²).
 
     The turbulence metric measures how unusual the current return vector is
     relative to a *calm-period baseline* distribution of returns across assets.
 
-    Turbulence_t = sqrt((r_t - mu_base)' Sigma_base^{-1} (r_t - mu_base))
+    Turbulence_t = (r_t - mu_base)' Sigma_base^{-1} (r_t - mu_base)
+
+    This is the squared form (d²) as defined in Kritzman & Li (2010) — no
+    square root. The squared form amplifies tail events (a 2x distance move
+    becomes 4x in the score), producing the dramatic crisis spikes seen in
+    Jordi Visser's model.
 
     Where:
     - r_t is the return vector at time t
@@ -181,7 +186,7 @@ class TurbulenceCalculator:
         cov_mat: np.ndarray
     ) -> float:
         """
-        Compute Mahalanobis distance for a single return vector.
+        Compute squared Mahalanobis distance (d²) for a single return vector.
 
         Args:
             return_vec: Current return vector
@@ -189,20 +194,20 @@ class TurbulenceCalculator:
             cov_mat: Historical covariance matrix
 
         Returns:
-            Mahalanobis distance (turbulence score)
+            Squared Mahalanobis distance (d²) turbulence score
         """
         diff = return_vec - mean_vec
 
         try:
             # Use pseudo-inverse for numerical stability
             cov_inv = np.linalg.pinv(cov_mat)
-            distance = np.sqrt(diff @ cov_inv @ diff)
+            distance = diff @ cov_inv @ diff
         except np.linalg.LinAlgError as e:
             logger.warning(f"Covariance inversion failed: {e}. Using regularization.")
             # Add small regularization
             reg_cov = cov_mat + np.eye(cov_mat.shape[0]) * 1e-6
             cov_inv = np.linalg.pinv(reg_cov)
-            distance = np.sqrt(diff @ cov_inv @ diff)
+            distance = diff @ cov_inv @ diff
 
         return distance
 
@@ -273,7 +278,7 @@ class TurbulenceCalculator:
 
             try:
                 diff = current_return - baseline_mean
-                dist = np.sqrt(diff @ baseline_cov_inv @ diff)
+                dist = diff @ baseline_cov_inv @ diff
                 turbulence.iloc[i] = dist
             except Exception as e:
                 logger.warning(f"Turbulence calculation failed for index {i}: {e}")
@@ -350,7 +355,7 @@ class TurbulenceCalculator:
 
                 cov_inv = np.linalg.pinv(cov_mat)
                 diff = current_return - mean_vec
-                dist = np.sqrt(diff @ cov_inv @ diff)
+                dist = diff @ cov_inv @ diff
                 turbulence.iloc[i] = dist
             except Exception as e:
                 logger.warning(f"Rolling turbulence failed at index {i}: {e}")
