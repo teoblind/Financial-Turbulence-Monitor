@@ -1,8 +1,12 @@
 """
 Dashboard visualization module.
 
-Creates the combined market turbulence dashboard with status panel,
-divergence detector chart, and VIX subplot using Matplotlib.
+Creates the combined market turbulence dashboard with:
+- Status panel showing Jordi Visser's regime framework
+- Turbulence time series with regime shading
+- VIX subplot
+- HYG/IEF credit ratio subplot
+- Last 90 days regime summary
 """
 
 import logging
@@ -21,6 +25,22 @@ from .signals import MarketStatus, SignalGenerator
 logger = logging.getLogger(__name__)
 
 
+# Regime color mapping
+REGIME_COLORS = {
+    'NORMAL': '#28a745',          # Green
+    'GREEN_BAR': '#ffc107',       # Amber
+    'STORM': '#fd7e14',           # Orange
+    'STORM_CONTAGION': '#dc3545', # Red
+}
+
+REGIME_BG_COLORS = {
+    'NORMAL': '#e8f5e9',
+    'GREEN_BAR': '#fff8e1',
+    'STORM': '#fff3e0',
+    'STORM_CONTAGION': '#ffebee',
+}
+
+
 class DashboardRenderer:
     """Renders the market turbulence dashboard."""
 
@@ -33,23 +53,30 @@ class DashboardRenderer:
             except OSError:
                 continue
 
+    def _vix_color(self, vix_level: float) -> str:
+        if vix_level > 40:
+            return '#dc3545'   # Red
+        elif vix_level > 25:
+            return '#fd7e14'   # Orange
+        elif vix_level > 20:
+            return '#ffc107'   # Yellow
+        else:
+            return '#28a745'   # Green
+
     def render_status_panel(
         self,
         ax: plt.Axes,
         status: MarketStatus,
-        signal_gen: SignalGenerator
+        signal_gen: SignalGenerator,
+        regime_counts: Optional[dict] = None,
     ) -> None:
-        """Render the status panel as a text box."""
+        """Render the status panel as a text box with Visser regime info."""
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.axis('off')
 
-        bg_colors = {
-            'HEALTHY': '#e8f5e9',
-            'ELEVATED': '#fff3e0',
-            'CRISIS': '#ffebee'
-        }
-        bg_color = bg_colors.get(status.regime, '#f5f5f5')
+        bg_color = REGIME_BG_COLORS.get(status.regime, '#f5f5f5')
+        regime_color = REGIME_COLORS.get(status.regime, '#333333')
 
         rect = mpatches.FancyBboxPatch(
             (0.02, 0.02), 0.96, 0.96,
@@ -61,121 +88,120 @@ class DashboardRenderer:
         ax.add_patch(rect)
 
         date_str = status.date.strftime("%Y-%m-%d")
-        ax.text(0.5, 0.92, f"CURRENT IMMUNE SYSTEM STATUS — {date_str}",
-                ha='center', va='top', fontsize=14, fontweight='bold',
+        ax.text(0.5, 0.94, f"MARKET IMMUNE SYSTEM STATUS — {date_str}",
+                ha='center', va='top', fontsize=13, fontweight='bold',
                 family='monospace')
 
-        regime_colors = {
-            'HEALTHY': self.config.status_healthy,
-            'ELEVATED': self.config.status_elevated,
-            'CRISIS': self.config.status_crisis
+        # Regime label
+        regime_labels = {
+            'NORMAL': 'NORMAL',
+            'GREEN_BAR': 'GREEN BAR (Complacency Warning)',
+            'STORM': 'STORM (Risk Realized)',
+            'STORM_CONTAGION': 'STORM + CONTAGION',
         }
+        regime_text = regime_labels.get(status.regime, status.regime)
+        if status.vix_override:
+            regime_text += "  [VIX OVERRIDE]"
 
-        regime_label = status.regime
-        if status.vix_override and status.model_regime:
-            regime_label += f"  [VIX OVERRIDE]"
+        ax.text(0.5, 0.86, f"REGIME: {regime_text}",
+                ha='center', va='top', fontsize=15, fontweight='bold',
+                color=regime_color, family='monospace')
 
-        ax.text(0.5, 0.83, f"WARNING LEVEL: {regime_label}",
-                ha='center', va='top', fontsize=16, fontweight='bold',
-                color=regime_colors.get(status.regime, 'black'),
+        # Left column — metrics
+        y_start = 0.76
+        line_h = 0.048
+        left_x = 0.06
+
+        ax.text(left_x, y_start + line_h, "CURRENT METRICS:",
+                ha='left', va='top', fontsize=10, fontweight='bold',
                 family='monospace')
-
-        # Metrics - left column
-        y_start = 0.72
-        line_height = 0.050
-        left_x = 0.08
 
         metrics = [
-            f"Market Turbulence: {status.turbulence:.1f} (P{status.turbulence_percentile:.0f})",
+            f"Turbulence: {status.turbulence:.1f} (P{status.turbulence_percentile:.0f})",
             f"Days Elevated: {status.days_elevated}",
-            f"SPX Level: {status.spx_level:,.2f}",
-            f"SPX vs 50-day MA: {status.spx_vs_ma50} ({status.spx_ma50_ratio:.2%})",
-            f"VIX Level: {status.vix_level:.1f}",
+            f"SPX: {status.spx_level:,.2f}  vs 50DMA: {status.spx_vs_ma50} ({status.spx_ma50_ratio:.2%})",
         ]
+        for i, m in enumerate(metrics):
+            ax.text(left_x + 0.02, y_start - i * line_h, f"  {m}",
+                    ha='left', va='top', fontsize=9, family='monospace')
 
-        ax.text(left_x, y_start + line_height, "CURRENT METRICS:",
-                ha='left', va='top', fontsize=11, fontweight='bold',
-                family='monospace')
+        # VIX with color
+        vix_y = y_start - len(metrics) * line_h
+        vix_color = self._vix_color(status.vix_level)
+        ax.text(left_x + 0.02, vix_y, f"  VIX: {status.vix_level:.1f}",
+                ha='left', va='top', fontsize=9, family='monospace',
+                color=vix_color, fontweight='bold')
 
-        for i, metric in enumerate(metrics):
-            ax.text(left_x + 0.02, y_start - i * line_height, f"• {metric}",
-                    ha='left', va='top', fontsize=10, family='monospace')
-
-        # VIX override indicator
-        override_y = y_start - 5 * line_height
-        if status.vix_override:
-            override_text = "• VIX Override: ACTIVE"
-            override_color = self.config.status_crisis
-            override_weight = 'bold'
+        # Credit / contagion
+        credit_y = vix_y - line_h
+        if status.hyg_ief_trend:
+            credit_color = '#dc3545' if status.hyg_ief_trend == "Credit Weakening" else '#28a745'
+            ax.text(left_x + 0.02, credit_y, f"  HYG/IEF: {status.hyg_ief_trend}",
+                    ha='left', va='top', fontsize=9, family='monospace',
+                    color=credit_color, fontweight='bold')
         else:
-            override_text = "• VIX Override: inactive"
-            override_color = 'black'
-            override_weight = 'normal'
-        ax.text(left_x + 0.02, override_y, override_text,
-                ha='left', va='top', fontsize=10, family='monospace',
-                color=override_color, fontweight=override_weight)
+            ax.text(left_x + 0.02, credit_y, "  HYG/IEF: N/A",
+                    ha='left', va='top', fontsize=9, family='monospace')
 
-        # Divergence indicator
-        div_y = override_y - line_height
-        div_color = self.config.status_crisis if status.divergence_active else 'black'
+        # Dispersion
+        disp_y = credit_y - line_h
+        if status.dispersion_percentile is not None:
+            ax.text(left_x + 0.02, disp_y,
+                    f"  Dispersion: P{status.dispersion_percentile:.0f}",
+                    ha='left', va='top', fontsize=9, family='monospace')
+
+        # Divergence
+        div_y = disp_y - line_h
+        div_color = '#dc3545' if status.divergence_active else '#333333'
         div_text = "YES" if status.divergence_active else "NO"
-        ax.text(left_x + 0.02, div_y, f"• Divergence Active: {div_text}",
-                ha='left', va='top', fontsize=10, family='monospace',
+        ax.text(left_x + 0.02, div_y, f"  Divergence: {div_text}",
+                ha='left', va='top', fontsize=9, family='monospace',
                 color=div_color, fontweight='bold' if status.divergence_active else 'normal')
 
-        # If overridden, show model regime
-        if status.vix_override and status.model_regime:
-            ax.text(left_x + 0.02, div_y - line_height,
-                    f"• Model Regime (pre-override): {status.model_regime}",
-                    ha='left', va='top', fontsize=10, family='monospace',
-                    color='#666666')
+        # Right column — interpretation + actions
+        right_x = 0.52
 
-        # AI Sector - right side top
-        right_x = 0.55
-        ax.text(right_x, y_start + line_height, "AI SECTOR CONTEXT:",
-                ha='left', va='top', fontsize=11, fontweight='bold',
+        # Interpretation
+        ax.text(right_x, y_start + line_h, "INTERPRETATION:",
+                ha='left', va='top', fontsize=10, fontweight='bold',
                 family='monospace')
+        for i, interp in enumerate(signal_gen.get_interpretation(status.regime)[:4]):
+            ax.text(right_x + 0.02, y_start - i * line_h, f"  {interp}",
+                    ha='left', va='top', fontsize=8, family='monospace')
 
-        if status.ai_turbulence is not None:
-            ai_text = f"• AI Basket Turbulence: {status.ai_turbulence:.1f}"
-        else:
-            ai_text = "• AI Basket Turbulence: N/A"
-        ax.text(right_x + 0.02, y_start, ai_text,
-                ha='left', va='top', fontsize=10, family='monospace')
-
-        # Interpretation - right side middle
-        interp_y = y_start - 2 * line_height
-        ax.text(right_x, interp_y + line_height, "INTERPRETATION:",
-                ha='left', va='top', fontsize=11, fontweight='bold',
+        # Actions
+        action_y = y_start - 5 * line_h
+        ax.text(right_x, action_y, "RECOMMENDED ACTIONS:",
+                ha='left', va='top', fontsize=10, fontweight='bold',
                 family='monospace')
+        for i, action in enumerate(signal_gen.get_recommended_actions(status.regime)[:4]):
+            ax.text(right_x + 0.02, action_y - (i + 1) * line_h, f"  {action}",
+                    ha='left', va='top', fontsize=8, family='monospace')
 
-        for i, interp in enumerate(signal_gen.get_interpretation(status.regime)[:3]):
-            ax.text(right_x + 0.02, interp_y - i * line_height, f"• {interp}",
-                    ha='left', va='top', fontsize=9, family='monospace')
-
-        # Recommended Actions - bottom
-        action_y = 0.20
-        ax.text(0.08, action_y, "RECOMMENDED ACTIONS:",
-                ha='left', va='top', fontsize=11, fontweight='bold',
+        # Bottom: thresholds + 90-day summary
+        bottom_y = 0.12
+        ax.text(left_x, bottom_y, "THRESHOLDS:",
+                ha='left', va='top', fontsize=10, fontweight='bold',
                 family='monospace')
-
-        actions = signal_gen.get_recommended_actions(status.regime)
-        for i, action in enumerate(actions[:3]):
-            ax.text(0.10, action_y - (i + 1) * 0.042, f"• {action}",
-                    ha='left', va='top', fontsize=9, family='monospace')
-
-        # Thresholds - bottom right
-        ax.text(right_x, action_y, "THRESHOLDS:",
-                ha='left', va='top', fontsize=11, fontweight='bold',
-                family='monospace')
-        ax.text(right_x + 0.02, action_y - 0.042,
-                f"• Warning (P95): {status.warning_threshold:.1f}",
-                ha='left', va='top', fontsize=9, family='monospace')
-        ax.text(right_x + 0.02, action_y - 0.084,
-                f"• Extreme (P99): {status.extreme_threshold:.1f}",
+        ax.text(left_x + 0.02, bottom_y - 0.04,
+                f"  P95: {status.warning_threshold:.1f}   P99: {status.extreme_threshold:.1f}",
                 ha='left', va='top', fontsize=9, family='monospace')
 
-    def render_divergence_chart(
+        # 90-day regime summary
+        if regime_counts:
+            ax.text(right_x, bottom_y, "LAST 90 DAYS:",
+                    ha='left', va='top', fontsize=10, fontweight='bold',
+                    family='monospace')
+            parts = []
+            for r in ['NORMAL', 'GREEN_BAR', 'STORM', 'STORM_CONTAGION']:
+                cnt = regime_counts.get(r, 0)
+                if cnt > 0:
+                    parts.append(f"{r}: {cnt}d")
+            ax.text(right_x + 0.02, bottom_y - 0.04,
+                    "  " + "  |  ".join(parts) if parts else "  No data",
+                    ha='left', va='top', fontsize=8, family='monospace')
+
+    def render_turbulence_chart(
         self,
         ax: plt.Axes,
         turbulence: pd.Series,
@@ -183,20 +209,20 @@ class DashboardRenderer:
         warning_threshold,
         extreme_threshold,
         divergence: pd.Series,
-        vix: Optional[pd.Series] = None,
+        regime: Optional[pd.Series] = None,
     ) -> None:
         """
-        Render the divergence detector chart with optional VIX subplot.
+        Render the turbulence chart with regime shading.
 
-        ``warning_threshold`` and ``extreme_threshold`` may be scalars or
-        pd.Series (expanding thresholds).
+        GREEN_BAR periods → yellow shading
+        STORM_CONTAGION periods → red shading
+        STORM periods → orange shading
         """
         common_idx = turbulence.index.intersection(spx_prices.index)
         turb = turbulence.loc[common_idx]
         spx = spx_prices.loc[common_idx]
-        div = divergence.reindex(common_idx).fillna(False)
 
-        # Resolve thresholds to arrays for plotting
+        # Resolve thresholds
         if isinstance(warning_threshold, pd.Series):
             warn_vals = warning_threshold.reindex(common_idx)
         else:
@@ -207,51 +233,55 @@ class DashboardRenderer:
         else:
             ext_vals = pd.Series(extreme_threshold, index=common_idx)
 
-        # Create twin axis for SPX
+        # Twin axis for SPX
         ax2 = ax.twinx()
 
-        # Plot turbulence on left axis
+        # Plot turbulence
         ax.plot(turb.index, turb.values, color=self.config.color_turbulence,
                 linewidth=1.2, label='Market Turbulence', zorder=3)
 
-        # Plot SPX on right axis
+        # Plot SPX
         ax2.plot(spx.index, spx.values, color=self.config.color_spx,
                  linewidth=1.5, label='SPX/SPY', zorder=3)
 
-        # Plot 50-day MA
+        # 50-day MA
         ma50 = spx.rolling(window=self.config.ma_long).mean()
         ax2.plot(spx.index, ma50.values, color=self.config.color_ma50,
                  linewidth=1, linestyle='--', label='50-day MA', alpha=0.7, zorder=2)
 
-        # Draw threshold lines (now rolling)
+        # Threshold lines
         ax.plot(warn_vals.index, warn_vals.values,
                 color=self.config.color_warning, linestyle='--', linewidth=1.5,
-                label=f'Warning (P95)', zorder=2)
+                label='Warning (P95)', zorder=2)
         ax.plot(ext_vals.index, ext_vals.values,
                 color=self.config.color_extreme, linestyle='--', linewidth=1.5,
-                label=f'Extreme (P99)', zorder=2)
+                label='Extreme (P99)', zorder=2)
 
-        # Green shading for divergence periods
-        in_divergence = False
-        start_date = None
-
-        for i, (date, is_div) in enumerate(div.items()):
-            if is_div and not in_divergence:
-                start_date = date
-                in_divergence = True
-            elif not is_div and in_divergence:
-                ax.axvspan(start_date, date, alpha=0.3,
-                          color=self.config.color_divergence, zorder=1)
-                in_divergence = False
-
-        if in_divergence and start_date is not None:
-            ax.axvspan(start_date, div.index[-1], alpha=0.3,
-                      color=self.config.color_divergence, zorder=1)
+        # Regime shading
+        if regime is not None:
+            regime_aligned = regime.reindex(common_idx)
+            shade_map = {
+                'GREEN_BAR': (self.config.color_green_bar, 0.25),
+                'STORM': (self.config.color_storm, 0.20),
+                'STORM_CONTAGION': (self.config.color_storm_contagion, 0.30),
+            }
+            for regime_name, (color, alpha) in shade_map.items():
+                in_regime = False
+                start_date = None
+                for date in common_idx:
+                    r = regime_aligned.get(date, None)
+                    if r == regime_name and not in_regime:
+                        start_date = date
+                        in_regime = True
+                    elif r != regime_name and in_regime:
+                        ax.axvspan(start_date, date, alpha=alpha, color=color, zorder=1)
+                        in_regime = False
+                if in_regime and start_date is not None:
+                    ax.axvspan(start_date, common_idx[-1], alpha=alpha, color=color, zorder=1)
 
         # Formatting
-        ax.set_xlabel('Date', fontsize=11)
-        ax.set_ylabel('Market Turbulence', fontsize=11, color=self.config.color_turbulence)
-        ax2.set_ylabel('SPX/SPY Level', fontsize=11, color=self.config.color_spx)
+        ax.set_ylabel('Market Turbulence', fontsize=10, color=self.config.color_turbulence)
+        ax2.set_ylabel('SPX/SPY Level', fontsize=10, color=self.config.color_spx)
 
         ax.tick_params(axis='y', labelcolor=self.config.color_turbulence)
         ax2.tick_params(axis='y', labelcolor=self.config.color_spx)
@@ -260,20 +290,23 @@ class DashboardRenderer:
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
-        turb_max = max(turb.max(), ext_vals.dropna().max() * 1.2) if len(ext_vals.dropna()) > 0 else turb.max() * 1.2
-        ax.set_ylim(0, turb_max)
+        turb_max = turb.max()
+        ext_max = ext_vals.dropna().max() if len(ext_vals.dropna()) > 0 else 0
+        ax.set_ylim(0, max(turb_max, ext_max) * 1.2)
 
-        # Combined legend
+        # Legend
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
 
-        div_patch = mpatches.Patch(color=self.config.color_divergence, alpha=0.3,
-                                   label='Divergence (High Turb + SPX Rising)')
-        all_handles = lines1 + lines2 + [div_patch]
-        all_labels = labels1 + labels2 + ['Divergence (High Turb + SPX Rising)']
+        legend_patches = []
+        for rname, (color, _) in [('GREEN_BAR', (self.config.color_green_bar, 0.3)),
+                                    ('STORM', (self.config.color_storm, 0.3)),
+                                    ('STORM_CONTAGION', (self.config.color_storm_contagion, 0.3))]:
+            legend_patches.append(mpatches.Patch(color=color, alpha=0.3, label=rname))
 
-        ax.legend(all_handles, all_labels, loc='upper left', fontsize=8,
-                  framealpha=0.9)
+        ax.legend(lines1 + lines2 + legend_patches,
+                  labels1 + labels2 + ['GREEN_BAR', 'STORM', 'STORM_CONTAGION'],
+                  loc='upper left', fontsize=7, framealpha=0.9)
 
         ax.grid(True, alpha=0.3, zorder=0)
         ax.set_axisbelow(True)
@@ -284,7 +317,7 @@ class DashboardRenderer:
         vix: pd.Series,
         turbulence: pd.Series,
     ) -> None:
-        """Render a VIX subplot below the main divergence chart."""
+        """Render VIX subplot with calm ceiling line."""
         common_idx = turbulence.index.intersection(vix.dropna().index)
         if len(common_idx) == 0:
             ax.text(0.5, 0.5, 'VIX data unavailable', ha='center', va='center')
@@ -297,22 +330,67 @@ class DashboardRenderer:
         ax.fill_between(vix_plot.index, 0, vix_plot.values,
                         alpha=0.15, color='#8B0000')
 
-        # Draw override thresholds
-        warn_level = getattr(self.config, 'vix_warning_level', 40.0)
-        crit_level = getattr(self.config, 'vix_critical_level', 60.0)
-        ax.axhline(y=warn_level, color='orange', linestyle=':', linewidth=1,
-                   label=f'VIX Warning ({warn_level:.0f})')
-        ax.axhline(y=crit_level, color='red', linestyle=':', linewidth=1,
-                   label=f'VIX Critical ({crit_level:.0f})')
+        vix_ceiling = getattr(self.config, 'vix_calm_ceiling', 25.0)
+        ax.axhline(y=vix_ceiling, color='#ffc107', linestyle=':', linewidth=1,
+                   label=f'Calm Ceiling ({vix_ceiling:.0f})')
+        ax.axhline(y=40, color='orange', linestyle=':', linewidth=1,
+                   label='VIX Warning (40)')
 
-        ax.set_ylabel('VIX', fontsize=10, color='#8B0000')
+        ax.set_ylabel('VIX', fontsize=9, color='#8B0000')
         ax.tick_params(axis='y', labelcolor='#8B0000')
 
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
-        ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
+        ax.legend(loc='upper left', fontsize=7, framealpha=0.9)
+        ax.grid(True, alpha=0.3, zorder=0)
+        ax.set_axisbelow(True)
+
+    def render_credit_subplot(
+        self,
+        ax: plt.Axes,
+        hyg_ief_ratio: pd.Series,
+        turbulence: pd.Series,
+        contagion: Optional[pd.Series] = None,
+    ) -> None:
+        """Render HYG/IEF credit ratio subplot with contagion shading."""
+        common_idx = turbulence.index.intersection(hyg_ief_ratio.dropna().index)
+        if len(common_idx) == 0:
+            ax.text(0.5, 0.5, 'HYG/IEF data unavailable', ha='center', va='center')
+            return
+
+        ratio_plot = hyg_ief_ratio.reindex(common_idx)
+
+        ax.plot(ratio_plot.index, ratio_plot.values, color='#1a237e',
+                linewidth=1.2, label='HYG/IEF Ratio')
+
+        # Shade contagion periods
+        if contagion is not None:
+            contagion_aligned = contagion.reindex(common_idx).fillna(False)
+            in_contagion = False
+            start_date = None
+            for date in common_idx:
+                if contagion_aligned.get(date, False) and not in_contagion:
+                    start_date = date
+                    in_contagion = True
+                elif not contagion_aligned.get(date, False) and in_contagion:
+                    ax.axvspan(start_date, date, alpha=0.2, color='#dc3545', zorder=1)
+                    in_contagion = False
+            if in_contagion and start_date is not None:
+                ax.axvspan(start_date, common_idx[-1], alpha=0.2, color='#dc3545', zorder=1)
+
+        ax.set_ylabel('HYG/IEF', fontsize=9, color='#1a237e')
+        ax.tick_params(axis='y', labelcolor='#1a237e')
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+        contagion_patch = mpatches.Patch(color='#dc3545', alpha=0.2, label='Contagion')
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles + [contagion_patch], labels + ['Contagion'],
+                  loc='upper left', fontsize=7, framealpha=0.9)
         ax.grid(True, alpha=0.3, zorder=0)
         ax.set_axisbelow(True)
 
@@ -327,51 +405,67 @@ class DashboardRenderer:
         vix: Optional[pd.Series] = None,
         warning_threshold=None,
         extreme_threshold=None,
+        regime: Optional[pd.Series] = None,
+        hyg_ief_ratio: Optional[pd.Series] = None,
+        contagion: Optional[pd.Series] = None,
+        regime_counts: Optional[dict] = None,
     ) -> plt.Figure:
         """
-        Render the complete dashboard.
-
-        Now includes a VIX subplot at the bottom when VIX data is available.
-        ``warning_threshold`` and ``extreme_threshold`` may be scalars or Series.
+        Render the complete dashboard with status panel, turbulence chart,
+        VIX subplot, and HYG/IEF credit subplot.
         """
         has_vix = vix is not None and not vix.empty
+        has_credit = hyg_ief_ratio is not None and not hyg_ief_ratio.empty
 
-        # Layout: status panel (30%), main chart (50%), VIX subplot (20%)
+        # Layout: status (25%), chart (35%), VIX (20%), credit (20%)
+        n_rows = 2  # status + chart
+        ratios = [0.30, 0.40]
         if has_vix:
-            fig = plt.figure(figsize=(self.config.figure_width, self.config.figure_height + 2))
-            gs = fig.add_gridspec(3, 1, height_ratios=[0.30, 0.48, 0.22], hspace=0.20)
-        else:
-            fig = plt.figure(figsize=(self.config.figure_width, self.config.figure_height))
-            gs = fig.add_gridspec(2, 1, height_ratios=[0.35, 0.65], hspace=0.15)
+            n_rows += 1
+            ratios.append(0.15)
+        if has_credit:
+            n_rows += 1
+            ratios.append(0.15)
+
+        total_height = self.config.figure_height + (n_rows - 2) * 2
+        fig = plt.figure(figsize=(self.config.figure_width, total_height))
+        gs = fig.add_gridspec(n_rows, 1, height_ratios=ratios, hspace=0.25)
 
         # Status panel
         ax_status = fig.add_subplot(gs[0])
-        self.render_status_panel(ax_status, status, signal_gen)
+        self.render_status_panel(ax_status, status, signal_gen, regime_counts)
 
-        # Resolve thresholds for chart
+        # Resolve thresholds
         w_thresh = warning_threshold if warning_threshold is not None else status.warning_threshold
         e_thresh = extreme_threshold if extreme_threshold is not None else status.extreme_threshold
 
-        # Divergence chart
+        # Turbulence chart
         ax_chart = fig.add_subplot(gs[1])
-        self.render_divergence_chart(
+        self.render_turbulence_chart(
             ax_chart, turbulence, spx_prices,
             w_thresh, e_thresh, divergence,
-            vix=vix,
+            regime=regime,
         )
 
         # VIX subplot
+        subplot_idx = 2
         if has_vix:
-            ax_vix = fig.add_subplot(gs[2])
+            ax_vix = fig.add_subplot(gs[subplot_idx])
             self.render_vix_subplot(ax_vix, vix, turbulence)
+            subplot_idx += 1
+
+        # Credit subplot
+        if has_credit:
+            ax_credit = fig.add_subplot(gs[subplot_idx])
+            self.render_credit_subplot(ax_credit, hyg_ief_ratio, turbulence, contagion)
 
         fig.suptitle(
-            "DIVERGENCE DETECTOR: Turbulence vs SPX (ENLARGED)\n"
-            "(Green shading = High turbulence while SPX rising - YOUR WARNING SIGNAL)",
-            fontsize=14, fontweight='bold', y=0.98
+            "MARKET TURBULENCE MONITOR — Jordi Visser Framework\n"
+            "(Regime shading: Yellow=GREEN_BAR  Orange=STORM  Red=STORM_CONTAGION)",
+            fontsize=13, fontweight='bold', y=0.99
         )
 
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
 
         if output_path:
             output_file = Path(output_path)
@@ -394,11 +488,14 @@ def save_features_csv(
     extreme_threshold,
     output_path: str,
     vix_override: Optional[pd.Series] = None,
+    hyg_ief_ratio: Optional[pd.Series] = None,
+    hyg_ief_slope: Optional[pd.Series] = None,
+    contagion: Optional[pd.Series] = None,
+    dispersion: Optional[pd.Series] = None,
+    dispersion_pctile: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Save computed features to CSV.
-
-    ``warning_threshold`` and ``extreme_threshold`` may be scalars or pd.Series.
     """
     spx_ma50 = spx_prices.rolling(window=50).mean()
     common_idx = turbulence.index
@@ -429,6 +526,21 @@ def save_features_csv(
 
     if vix_override is not None:
         features['vix_override'] = vix_override.reindex(common_idx)
+
+    if hyg_ief_ratio is not None and not hyg_ief_ratio.empty:
+        features['hyg_ief_ratio'] = hyg_ief_ratio.reindex(common_idx)
+
+    if hyg_ief_slope is not None:
+        features['hyg_ief_slope'] = hyg_ief_slope.reindex(common_idx)
+
+    if contagion is not None:
+        features['contagion'] = contagion.reindex(common_idx)
+
+    if dispersion is not None:
+        features['dispersion'] = dispersion.reindex(common_idx)
+
+    if dispersion_pctile is not None:
+        features['dispersion_pctile'] = dispersion_pctile.reindex(common_idx)
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)

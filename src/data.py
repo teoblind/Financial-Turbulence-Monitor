@@ -3,6 +3,7 @@ Data fetching and processing module.
 
 Handles downloading market data from yfinance, cleaning, and computing returns.
 Includes fallback to simulated data for testing when API access is unavailable.
+Also computes ratio pair columns (IWM/QQQ, HYG/IEF) for the turbulence matrix.
 """
 
 import logging
@@ -61,7 +62,6 @@ def generate_simulated_data(
     }
 
     # Correlation structure
-    # Equities correlated, bonds negative with equities, VIX inverse to equities
     ticker_types = {
         'equity': ['SPY', 'QQQ', 'IWM', 'EFA', 'EEM', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'SMH'],
         'bond': ['TLT', 'IEF'],
@@ -77,15 +77,12 @@ def generate_simulated_data(
         for j, t2 in enumerate(tickers):
             if i == j:
                 continue
-            # Same type: high correlation
             for type_name, type_tickers in ticker_types.items():
                 if t1 in type_tickers and t2 in type_tickers:
                     corr_matrix[i, j] = 0.7 + np.random.uniform(-0.1, 0.1)
-            # Equity vs Bond: negative correlation
             if (t1 in ticker_types['equity'] and t2 in ticker_types['bond']) or \
                (t2 in ticker_types['equity'] and t1 in ticker_types['bond']):
                 corr_matrix[i, j] = -0.3 + np.random.uniform(-0.1, 0.1)
-            # Equity vs VIX: strong negative correlation
             if (t1 in ticker_types['equity'] and t2 in ticker_types['volatility']) or \
                (t2 in ticker_types['equity'] and t1 in ticker_types['volatility']):
                 corr_matrix[i, j] = -0.6 + np.random.uniform(-0.1, 0.1)
@@ -94,48 +91,39 @@ def generate_simulated_data(
     corr_matrix = (corr_matrix + corr_matrix.T) / 2
     np.fill_diagonal(corr_matrix, 1.0)
 
-    # Eigenvalue adjustment for positive definiteness
     eigvals, eigvecs = np.linalg.eigh(corr_matrix)
     eigvals = np.maximum(eigvals, 0.01)
     corr_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
-    # Base volatilities
     base_vol = np.array([0.01 if t not in ['^VIX'] else 0.05 for t in tickers])
 
-    # Generate correlated returns with volatility clustering
     L = np.linalg.cholesky(corr_matrix)
 
     prices = np.zeros((n_days, n_tickers))
     prices[0] = [base_prices.get(t, 100) for t in tickers]
 
-    vol_state = np.ones(n_tickers)  # Volatility multiplier
+    vol_state = np.ones(n_tickers)
 
     for t in range(1, n_days):
-        # Update volatility state (GARCH-like)
         vol_state = 0.9 * vol_state + 0.1 * np.abs(np.random.randn(n_tickers))
         vol_state = np.clip(vol_state, 0.5, 3.0)
 
-        # Add stress events
         if t in [int(n_days * 0.3), int(n_days * 0.6), int(n_days * 0.85)]:
-            vol_state *= 2.5  # Spike volatility
+            vol_state *= 2.5
 
-        # Generate correlated returns
         z = np.random.randn(n_tickers)
         correlated_z = L @ z
 
-        # Apply returns
         daily_vol = base_vol * vol_state
-        returns = 0.0003 + daily_vol * correlated_z  # Small positive drift
+        returns = 0.0003 + daily_vol * correlated_z
 
-        # VIX moves inversely to equities
-        vix_idx = [i for i, t in enumerate(tickers) if t == '^VIX']
-        spy_idx = [i for i, t in enumerate(tickers) if t == 'SPY']
+        vix_idx = [i for i, t2 in enumerate(tickers) if t2 == '^VIX']
+        spy_idx = [i for i, t2 in enumerate(tickers) if t2 == 'SPY']
         if vix_idx and spy_idx:
             returns[vix_idx[0]] = -returns[spy_idx[0]] * 3 + np.random.randn() * 0.02
 
         prices[t] = prices[t-1] * np.exp(returns)
 
-    # Create DataFrame
     df = pd.DataFrame(prices, index=dates, columns=tickers)
 
     logger.info(f"Generated simulated data: {df.shape[0]} rows, {df.shape[1]} columns")
@@ -168,7 +156,6 @@ class DataFetcher:
         Returns:
             DataFrame with adjusted close prices, tickers as columns
         """
-        # Try yfinance first, fall back to simulated if unavailable or fails
         if not YFINANCE_AVAILABLE or use_simulated:
             logger.info("Using simulated data (yfinance unavailable or simulated mode requested)")
             return generate_simulated_data(tickers, start_date, end_date)
@@ -191,7 +178,6 @@ class DataFetcher:
                     logger.warning(f"No data returned for {ticker}, skipping")
                     continue
 
-                # Handle both single and multi-index column cases
                 if isinstance(data.columns, pd.MultiIndex):
                     close_col = ('Close', ticker)
                     if close_col in data.columns:
@@ -209,11 +195,9 @@ class DataFetcher:
                 continue
 
         if not all_data:
-            # Fall back to simulated data
             logger.warning("Failed to fetch any live data. Falling back to simulated data.")
             return generate_simulated_data(tickers, start_date, end_date)
 
-        # Combine all data into single DataFrame
         prices_df = pd.DataFrame(all_data)
         prices_df.index = pd.to_datetime(prices_df.index)
         prices_df = prices_df.sort_index()
@@ -242,7 +226,6 @@ class DataFetcher:
         else:
             returns = prices.pct_change()
 
-        # Drop first row (NaN) and any rows with all NaN
         returns = returns.dropna(how='all')
 
         return returns
@@ -267,16 +250,61 @@ class DataFetcher:
             mas[window] = prices.rolling(window=window).mean()
         return mas
 
-    def fetch_all_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series]:
+    def add_ratio_pairs(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+    ) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Add ratio pair log-return columns to the returns matrix.
+
+        Adds:
+        - IWM_QQQ_ratio_ret: daily log-change of IWM/QQQ ratio
+        - HYG_IEF_ratio_ret: daily log-change of HYG/IEF ratio
+
+        Also returns the raw HYG/IEF price ratio for contagion detection.
+
+        Args:
+            prices: Price DataFrame (must contain IWM, QQQ, HYG, IEF)
+            returns: Returns DataFrame to augment
+
+        Returns:
+            Tuple of (augmented_returns, hyg_ief_price_ratio)
+        """
+        augmented = returns.copy()
+        hyg_ief_ratio = pd.Series(dtype=float)
+
+        # IWM/QQQ ratio returns
+        if 'IWM' in prices.columns and 'QQQ' in prices.columns:
+            iwm_qqq_ratio = prices['IWM'] / prices['QQQ']
+            iwm_qqq_ret = np.log(iwm_qqq_ratio / iwm_qqq_ratio.shift(1))
+            augmented['IWM_QQQ_ratio_ret'] = iwm_qqq_ret.reindex(augmented.index)
+            logger.info("Added IWM/QQQ ratio returns to turbulence matrix")
+        else:
+            logger.warning("IWM or QQQ not in prices — skipping IWM/QQQ ratio")
+
+        # HYG/IEF ratio returns
+        if 'HYG' in prices.columns and 'IEF' in prices.columns:
+            hyg_ief_ratio = prices['HYG'] / prices['IEF']
+            hyg_ief_ret = np.log(hyg_ief_ratio / hyg_ief_ratio.shift(1))
+            augmented['HYG_IEF_ratio_ret'] = hyg_ief_ret.reindex(augmented.index)
+            logger.info("Added HYG/IEF ratio returns to turbulence matrix")
+        else:
+            logger.warning("HYG or IEF not in prices — skipping HYG/IEF ratio")
+
+        return augmented, hyg_ief_ratio
+
+    def fetch_all_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
         """
         Fetch all required data for the turbulence system.
 
         Returns:
             Tuple of:
             - turbulence_prices: Prices for turbulence basket
-            - turbulence_returns: Returns for turbulence basket
+            - turbulence_returns: Returns for turbulence basket (with ratio pairs if enabled)
             - ai_returns: Returns for AI sector basket
             - vix: VIX series
+            - hyg_ief_ratio: Raw HYG/IEF price ratio for contagion detection
         """
         use_sim = getattr(self.config, 'use_simulated', False)
 
@@ -320,14 +348,23 @@ class DataFetcher:
         # Compute returns
         turbulence_returns = self.compute_returns(turbulence_prices)
 
+        # Add ratio pair columns if configured
+        hyg_ief_ratio = pd.Series(dtype=float)
+        if getattr(self.config, 'include_ratio_pairs', True):
+            turbulence_returns, hyg_ief_ratio = self.add_ratio_pairs(
+                turbulence_prices, turbulence_returns
+            )
+
         # Align all data to common dates
         common_index = turbulence_returns.index
         if not vix.empty:
             vix = vix.reindex(common_index)
         if not ai_returns.empty:
             ai_returns = ai_returns.reindex(common_index)
+        if not hyg_ief_ratio.empty:
+            hyg_ief_ratio = hyg_ief_ratio.reindex(common_index)
 
-        return turbulence_prices, turbulence_returns, ai_returns, vix
+        return turbulence_prices, turbulence_returns, ai_returns, vix, hyg_ief_ratio
 
     def get_spx_data(self, prices: pd.DataFrame) -> pd.Series:
         """
@@ -359,7 +396,6 @@ def clean_data(df: pd.DataFrame, min_valid_ratio: float = 0.7) -> pd.DataFrame:
     Returns:
         Cleaned DataFrame
     """
-    # Remove columns with too many NaNs
     valid_counts = df.notna().sum()
     min_valid = int(len(df) * min_valid_ratio)
     valid_columns = valid_counts[valid_counts >= min_valid].index.tolist()
@@ -370,10 +406,8 @@ def clean_data(df: pd.DataFrame, min_valid_ratio: float = 0.7) -> pd.DataFrame:
 
     df_clean = df[valid_columns].copy()
 
-    # Forward fill then backward fill remaining NaNs
     df_clean = df_clean.ffill().bfill()
 
-    # Drop any remaining rows with NaN
     df_clean = df_clean.dropna()
 
     return df_clean

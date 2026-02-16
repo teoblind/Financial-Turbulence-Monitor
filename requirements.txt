@@ -7,6 +7,9 @@ pandas>=1.3.0
 # Machine learning (for Ledoit-Wolf shrinkage)
 scikit-learn>=1.0.0
 
+# Statistics (for contagion detection via linear regression)
+scipy>=1.7.0
+
 # Data fetching
 yfinance>=0.2.0
 

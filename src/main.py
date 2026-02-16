@@ -2,6 +2,7 @@
 Main orchestration module for Market Turbulence Monitoring System.
 
 This module ties together all components and provides CLI interface.
+Implements Jordi Visser's three-regime framework with contagion detection.
 """
 
 import argparse
@@ -36,16 +37,18 @@ def run_pipeline(config: TurbulenceConfig) -> None:
     """
     logger.info("=" * 60)
     logger.info("MARKET TURBULENCE MONITORING SYSTEM")
+    logger.info("Jordi Visser Framework — Three-Regime Model")
     logger.info("=" * 60)
     logger.info(f"Date range: {config.start_date} to {config.end_date}")
     logger.info(f"Divergence rule: {config.divergence_rule}")
     logger.info(f"Covariance method: {config.covariance_method}")
     logger.info(f"Baseline method: {getattr(config, 'baseline_method', 'calm_period')}")
+    logger.info(f"Include ratio pairs: {getattr(config, 'include_ratio_pairs', True)}")
 
-    # Step 1: Fetch data
-    logger.info("\n[1/6] Fetching market data...")
+    # Step 1: Fetch data (now returns 5 items including hyg_ief_ratio)
+    logger.info("\n[1/7] Fetching market data...")
     fetcher = DataFetcher(config)
-    turbulence_prices, turbulence_returns, ai_returns, vix = fetcher.fetch_all_data()
+    turbulence_prices, turbulence_returns, ai_returns, vix, hyg_ief_ratio = fetcher.fetch_all_data()
 
     # Clean data
     turbulence_returns_clean = clean_data(turbulence_returns)
@@ -55,38 +58,51 @@ def run_pipeline(config: TurbulenceConfig) -> None:
     # Get SPX data
     spx_prices = fetcher.get_spx_data(turbulence_prices)
 
-    # Step 2: Compute turbulence (now baseline-anchored)
-    logger.info("\n[2/6] Computing market turbulence (baseline-anchored)...")
+    # Step 2: Compute turbulence (baseline-anchored)
+    logger.info("\n[2/7] Computing market turbulence (baseline-anchored)...")
     calc = TurbulenceCalculator(config)
 
-    # Compute baseline covariance from calm period, then score
     turbulence = calc.compute_rolling_turbulence(
         turbulence_returns_clean,
         vix=vix,
     )
 
-    # Step 3: Compute expanding thresholds + regimes + VIX override
-    logger.info("\n[3/6] Computing expanding thresholds and regimes...")
+    # Step 3: Compute expanding thresholds
+    logger.info("\n[3/7] Computing expanding thresholds...")
     signal_gen = SignalGenerator(config)
 
-    # Expanding thresholds (Fix 2)
     warning_thresh_series, extreme_thresh_series = signal_gen.compute_expanding_thresholds(turbulence)
 
-    # Also compute static thresholds (for backward compat / status display)
+    # Static thresholds for backward compat
     warning_thresh_static, extreme_thresh_static = calc.compute_thresholds(turbulence)
 
-    # For days_elevated, use the latest expanding threshold value
+    # Days elevated
     latest_warn = warning_thresh_series.dropna()
     days_elevated_threshold = latest_warn.iloc[-1] if len(latest_warn) > 0 else warning_thresh_static
     days_elevated = calc.compute_days_elevated(turbulence, days_elevated_threshold)
 
-    # Compute regimes using expanding thresholds
+    # Step 4: Compute Visser regime classification
+    logger.info("\n[4/7] Computing Visser regime classification...")
+
     regime = signal_gen.compute_regime_series(
-        turbulence, warning_thresh_series, extreme_thresh_series
+        turbulence, warning_thresh_series, extreme_thresh_series,
+        spx_prices=spx_prices, vix=vix,
     )
 
-    # Apply VIX override (Fix 3)
+    # Contagion detection
+    hyg_ief_slope = None
+    contagion = None
+    if hyg_ief_ratio is not None and not hyg_ief_ratio.empty:
+        logger.info("Running contagion detection (HYG/IEF slope)...")
+        hyg_ief_slope, contagion = signal_gen.check_contagion(hyg_ief_ratio)
+        regime = signal_gen.apply_contagion_to_regime(regime, contagion)
+
+    # VIX override (catches edge cases)
     regime, vix_override = signal_gen.apply_vix_override(regime, vix)
+
+    # Step 5: Compute dispersion
+    logger.info("\n[5/7] Computing cross-sectional dispersion...")
+    dispersion, dispersion_pctile = signal_gen.compute_dispersion(turbulence_returns_clean)
 
     # Compute AI turbulence
     ai_turbulence = None
@@ -96,14 +112,16 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         if not ai_returns_clean.empty:
             ai_turbulence = compute_ai_turbulence(ai_returns_clean, config)
 
-    # Step 4: Generate signals
-    logger.info("\n[4/6] Generating divergence signals...")
-    # Use the latest static threshold for divergence detection
+    # Step 6: Generate signals and status
+    logger.info("\n[6/7] Generating signals and status...")
     divergence = signal_gen.detect_divergence(
         turbulence, spx_prices, warning_thresh_static, config.divergence_rule
     )
 
-    # Generate current status
+    # 90-day regime summary
+    regime_last_90 = regime.iloc[-90:] if len(regime) >= 90 else regime
+    regime_counts = regime_last_90.value_counts().to_dict()
+
     status = signal_gen.generate_status(
         turbulence=turbulence,
         spx_prices=spx_prices,
@@ -115,15 +133,18 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         ai_turbulence=ai_turbulence,
         regime_series=regime,
         vix_override_series=vix_override,
+        hyg_ief_slope=hyg_ief_slope,
+        contagion_series=contagion,
+        dispersion=dispersion,
+        dispersion_pctile=dispersion_pctile,
     )
 
-    # Step 5: Print status to console
-    logger.info("\n[5/6] Current Market Status:")
+    # Print status to console
     status_text = format_status_text(status, signal_gen)
     print("\n" + status_text + "\n")
 
-    # Step 6: Render dashboard and save outputs
-    logger.info("\n[6/6] Rendering dashboard and saving outputs...")
+    # Step 7: Render dashboard and save outputs
+    logger.info("\n[7/7] Rendering dashboard and saving outputs...")
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -141,6 +162,10 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         vix=vix,
         warning_threshold=warning_thresh_series,
         extreme_threshold=extreme_thresh_series,
+        regime=regime,
+        hyg_ief_ratio=hyg_ief_ratio,
+        contagion=contagion,
+        regime_counts=regime_counts,
     )
     plt.close(fig)
 
@@ -157,6 +182,11 @@ def run_pipeline(config: TurbulenceConfig) -> None:
         extreme_threshold=extreme_thresh_series,
         output_path=str(features_path),
         vix_override=vix_override,
+        hyg_ief_ratio=hyg_ief_ratio,
+        hyg_ief_slope=hyg_ief_slope,
+        contagion=contagion,
+        dispersion=dispersion,
+        dispersion_pctile=dispersion_pctile,
     )
 
     logger.info("\n" + "=" * 60)
@@ -258,6 +288,12 @@ Examples:
         help='VIX ceiling for calm baseline period. Default: 25'
     )
 
+    parser.add_argument(
+        '--no_ratio_pairs',
+        action='store_true',
+        help='Disable IWM/QQQ and HYG/IEF ratio pair columns in the covariance matrix'
+    )
+
     # Jupyter compatibility: detect if running inside Jupyter kernel
     if "ipykernel" in sys.modules:
         args = parser.parse_args([])
@@ -293,6 +329,8 @@ Examples:
         config_kwargs['baseline_method'] = args.baseline_method
     if args.baseline_vix:
         config_kwargs['baseline_vix_threshold'] = args.baseline_vix
+    if args.no_ratio_pairs:
+        config_kwargs['include_ratio_pairs'] = False
 
     try:
         config = get_config(**config_kwargs)

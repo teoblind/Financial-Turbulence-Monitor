@@ -2,7 +2,7 @@
 Configuration module for Market Turbulence Monitoring System.
 
 Contains all configurable parameters for data fetching, turbulence calculation,
-divergence detection, and visualization.
+regime classification, contagion detection, and visualization.
 """
 
 from dataclasses import dataclass, field
@@ -63,18 +63,33 @@ class TurbulenceConfig:
     # Covariance estimation method: 'ledoit_wolf' or 'sample'
     covariance_method: Literal['ledoit_wolf', 'sample'] = 'ledoit_wolf'
 
-    # === Baseline / Dual-Covariance Settings ===
-    # Method for computing baseline covariance: "calm_period", "first_n_days", "expanding"
+    # === Baseline Covariance ===
+    # Method: "calm_period", "first_n_days", "expanding"
     baseline_method: str = "calm_period"
 
     # VIX ceiling used to identify "calm" days for the baseline covariance
     baseline_vix_threshold: float = 25.0
 
-    # === VIX Override Settings ===
-    # VIX level that triggers an OVERRIDE_WARNING when model says HEALTHY
-    vix_warning_level: float = 40.0
+    # Minimum days needed for baseline computation
+    min_baseline_days: int = 252
 
-    # VIX level that forces minimum regime to ELEVATED
+    # === Regime Classification (Jordi Visser's framework) ===
+    # VIX threshold separating GREEN_BAR from STORM
+    vix_calm_ceiling: float = 25.0
+
+    # === Contagion Detection ===
+    # Lookback window for HYG/IEF slope computation (trading days)
+    contagion_lookback: int = 20
+
+    # Slope threshold: negative slope = contagion
+    contagion_slope_threshold: float = 0.0
+
+    # === Ratio Pairs ===
+    # Whether to include IWM/QQQ and HYG/IEF ratio returns in the covariance matrix
+    include_ratio_pairs: bool = True
+
+    # === VIX Override Settings (backward compat) ===
+    vix_warning_level: float = 40.0
     vix_critical_level: float = 60.0
 
     # === Threshold Percentiles ===
@@ -85,9 +100,6 @@ class TurbulenceConfig:
     min_threshold_observations: int = 126
 
     # === Divergence Detection ===
-    # Rule for determining "SPX rising": 'ma50' or 'ma20_slope'
-    # 'ma50': SPX close > 50-day moving average
-    # 'ma20_slope': 20-day MA has positive slope
     divergence_rule: Literal['ma50', 'ma20_slope'] = 'ma50'
 
     # Moving average periods
@@ -115,7 +127,13 @@ class TurbulenceConfig:
     color_divergence: str = "#2ca02c"  # Green (with alpha)
     color_ma50: str = "#7f7f7f"  # Gray
 
-    # Status box colors
+    # Regime colors (Jordi's framework)
+    color_normal: str = "#28a745"       # Green
+    color_green_bar: str = "#ffc107"    # Amber/Yellow
+    color_storm: str = "#fd7e14"        # Orange
+    color_storm_contagion: str = "#dc3545"  # Red
+
+    # Status box colors (backward compat aliases)
     status_healthy: str = "#28a745"  # Green
     status_elevated: str = "#ffc107"  # Yellow/Amber
     status_crisis: str = "#dc3545"  # Red
@@ -138,7 +156,6 @@ def get_config(**kwargs) -> TurbulenceConfig:
     config = TurbulenceConfig()
 
     # Always compute dates dynamically if not explicitly provided
-    # This fixes the issue where dates are cached at module import time
     if 'end_date' not in kwargs:
         config.end_date = datetime.now().strftime("%Y-%m-%d")
     if 'start_date' not in kwargs:

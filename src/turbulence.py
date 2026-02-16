@@ -128,7 +128,8 @@ class TurbulenceCalculator:
             calm_returns = returns.loc[calm_mask.fillna(False)]
 
             # Fallback: if not enough calm days, use lowest-VIX quartile
-            if len(calm_returns) < self.config.min_observations:
+            min_baseline = getattr(self.config, 'min_baseline_days', self.config.min_observations)
+            if len(calm_returns) < min_baseline:
                 logger.warning(
                     f"Only {len(calm_returns)} days with VIX < {threshold}. "
                     "Falling back to lowest-VIX quartile."
@@ -140,7 +141,7 @@ class TurbulenceCalculator:
                     calm_returns = returns.loc[calm_mask.fillna(False)]
 
             # Second fallback: first N days
-            if len(calm_returns) < self.config.min_observations:
+            if len(calm_returns) < min_baseline:
                 logger.warning(
                     "Lowest-VIX quartile still insufficient. "
                     "Using first lookback_window days as baseline."
