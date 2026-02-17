@@ -250,6 +250,9 @@ class TurbulenceCalculator:
         returns_clean = returns[valid_columns].copy()
         returns_clean = returns_clean.ffill().bfill()
 
+        # Convert decimal returns to percentage for Kritzman & Li scale
+        returns_clean = returns_clean * 100
+
         n_days = len(returns_clean)
         turbulence = pd.Series(index=returns_clean.index, dtype=float)
 
@@ -325,6 +328,9 @@ class TurbulenceCalculator:
             return pd.Series(dtype=float)
         returns_clean = returns[valid_columns].copy()
         returns_clean = returns_clean.ffill().bfill()
+
+        # Convert decimal returns to percentage for Kritzman & Li scale
+        returns_clean = returns_clean * 100
 
         n_days = len(returns_clean)
         turbulence = pd.Series(index=returns_clean.index, dtype=float)
